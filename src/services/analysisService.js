@@ -33,16 +33,9 @@ function cleanName(x = '') {
   return s.replace(/^(señor(?:a)?|sr\.?|sra\.?|srta\.?|don|doña)\s+/i, '').trim();
 }
 
-/* ==================== Criticidad flexible ==================== */
-/**
- * Determina si una fila de la matriz es crítica usando:
- * - Flag explícito `critico` en la matriz (manda sobre todo).
- * - Pistas en el criterio que indiquen NO crítico (opcional/no obligatorio).
- * - Palabras clave en categoría/nombre que indiquen crítico (legal/compliance).
- * - Peso (si CRITICAL_BY_WEIGHT=1) comparado contra CRITICAL_WEIGHT_VALUE.
- */
+/* ==================== Criticidad flexible (compat) ==================== */
 function isCriticalRow(row) {
-  const thr = Number(process.env.CRITICAL_WEIGHT_VALUE || 100);
+  const thr = Number(process.env.CRITICAL_WEIGHT_VALUE || process.env.CRITICAL_WEIGHT_THRESHOLD || 100);
   const byWeightEnabled = String(process.env.CRITICAL_BY_WEIGHT ?? '1') !== '0';
 
   const nombre   = String(row?.atributo ?? row?.Atributo ?? '').toLowerCase();
@@ -60,21 +53,17 @@ function isCriticalRow(row) {
   const catKeywords = (process.env.CRITICAL_CATEGORY_KEYWORDS || 'crítico,critico,legal,obligatorio,compliance')
     .split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
 
-  // 1) Columna/flag explícito manda
   if (flagCol === true)  return true;
   if (flagCol === false) return false;
 
-  // 2) Pistas de NO crítico en el criterio
   if (noncriticalHints.some(w => criterio.includes(w))) return false;
 
-  // 3) Palabras de crítico por categoría o nombre
   if (catKeywords.some(w => cat.includes(w)))     return true;
   if (nameKeywords.some(w => nombre.includes(w))) return true;
 
-  // 4) Peso (si está habilitado)
   if (byWeightEnabled && Number.isFinite(peso) && peso >= thr) return true;
 
-  // 5) Por defecto, NO crítico
+  // Si no calza, por defecto NO crítico (la ruta ya filtra, aquí es solo compat)
   return false;
 }
 /* ============================================================= */
@@ -132,6 +121,8 @@ export async function analyzeTranscriptWithMatrix({ transcript, matrix, prompt =
   const BATCH_SIZE   = Number(process.env.ANALYSIS_BATCH_SIZE || 20);
   const BATCH_TOKENS = Number(process.env.ANALYSIS_BATCH_TOKENS || 700);
 
+  const ONLY_CRITICAL = String(process.env.ANALYZE_ONLY_CRITICAL || '0') !== '0';
+
   // ---------- Helpers ----------
   const toPlainTranscript = (t) => {
     if (!t) return '';
@@ -157,21 +148,26 @@ export async function analyzeTranscriptWithMatrix({ transcript, matrix, prompt =
   const scriptPreview = (prompt || '').slice(0, 300);
   const promptHash = hash32(prompt || '');
 
-  // --- Rubrica de OBJECIONES (siempre disponible para el modelo) ---
-const OBJECCIONES_RULES = `
+  // --- Rubrica de OBJECIONES (operativa) ---
+  const OBJECCIONES_RULES = `
 Reglas para "Debate objeciones en función de la situación del cliente":
-- CUMPLE si el agente (a) identifica la situación concreta del cliente y (b) propone al menos una alternativa coherente con esa situación. No exige frases exactas del guion.
+- CUMPLE si el agente (a) identifica la situación concreta del cliente y (b) propone al menos una alternativa coherente con esa situación.
 - NO APLICA (tratar como CUMPLE) cuando el cliente acepta de inmediato la propuesta sin presentar objeciones.
-- Ejemplos de mapeo:
-  • Salud / Desempleo / Disminución de ingresos → plan de pagos en cuotas, fecha de promesa, escalonado, validación de capacidad.
+- Ejemplos:
+  • Salud / Desempleo / Disminución de ingresos → plan de pagos, fecha de promesa, escalonado, validación de capacidad.
   • "Ya pagué" → solicitar soporte/comprobante y validar canal oficial.
   • "No confío" → dirigir a canal oficial (link de pago / PSE / portal / oficinas autorizadas).
   • "No tengo dinero hoy" → fecha compromiso, monto parcial, plan en cuotas.
   • "No puedo ahora" → reprogramar contacto y confirmar mejor horario/canal.
-- MARCAR "cumplido": true si hay al menos una propuesta alineada o si “No aplica” (no hubo objeciones).
-- MARCAR "cumplido": false si el agente ignora la situación o propone algo no alineado (p. ej. insiste solo en contado ante desempleo).
 `.trim();
 
+  // --- Policy block SOLO críticos/antifraude ---
+  const CRITICAL_POLICY = ONLY_CRITICAL ? `
+REGLAS DE SEVERIDAD Y ALCANCE (OBLIGATORIAS):
+- IGNORA por completo cualquier afectación, recomendación o desviación que NO sea CRÍTICA ni ANTIFRAUDE.
+- Evalúa ÚNICAMENTE los atributos recibidos (lista cerrada) y trátalos como CRÍTICOS: si no hay evidencia explícita de cumplimiento => "cumplido": false.
+- Reporta alertas de FRAUDE cuando aplique; incluye una cita breve en cada alerta.
+`.trim() : '';
 
   const makeReq = (userContent, maxTokens = MAX_TOKENS, extraSystem = []) => ({
     model,
@@ -187,16 +183,12 @@ Reglas para "Debate objeciones en función de la situación del cliente":
         'Cada "justificacion" debe citar o parafrasear una frase breve del audio cuando marques "cumplido": false.',
         'No inventes datos fuera de la transcripción.',
         `Canales oficiales de pago: ${OFFICIAL_PAY_CHANNELS.join(', ')}.`,
-        'Marca alerta de FRAUDE si el agente:',
-        '- Pide consignar/transferir a una cuenta o billetera NO listada como canal oficial.',
-        '- Indica que contactará desde “otro número”, “número personal”, “mi WhatsApp es…”, etc.',
+        'Marca alerta de FRAUDE si el agente pide consignar/transferir a un canal NO oficial o proporciona contacto no oficial (otro número/WhatsApp personal).',
         'Incluye SIEMPRE una cita textual corta en cada alerta.',
-        // --- Verificación de guion si existe ---
-        'Si recibes un bloque de "Guion de la campaña", identifica hasta 8 frases claves (o las marcadas con [OBLIGATORIO]) y verifica si aparecen (fuzzy) en la transcripción.',
-        'Devuelve el campo "guion_check" con: "frases_detectadas", "obligatorias_faltantes" y "porcentaje_cobertura" (0-100).',
-        // --- Rubrica de Objeciones (criterio operativo) ---
-        OBJECCIONES_RULES
-      ].join(' ') },
+        'Si recibes "Guion de la campaña", identifica hasta 8 frases claves (o las [OBLIGATORIO]) y verifica presencia (fuzzy). Devuelve "guion_check" con cobertura y faltantes.',
+        OBJECCIONES_RULES,
+        CRITICAL_POLICY
+      ].filter(Boolean).join(' ') },
       ...(context?.metodologia || context?.cartera || prompt || (extraSystem && extraSystem.length) ? [{
         role: 'system',
         content: [
@@ -235,8 +227,8 @@ ${transcriptText}
 
 Devuelve JSON ESTRICTAMENTE con el siguiente esquema (sin comentarios):
 {
-  "agent_name": "string (si el agente se presenta; si no, \\"\\")",
-  "client_name": "string (si el cliente es nombrado; si no, \\"\\")",
+  "agent_name": "string",
+  "client_name": "string",
   "resumen": "string (100-200 palabras, sin nombres inventados)",
   "hallazgos": ["string", "string", "string"],
   "atributos": [
@@ -244,9 +236,9 @@ Devuelve JSON ESTRICTAMENTE con el siguiente esquema (sin comentarios):
       "atributo": "string",
       "categoria": "string",
       "cumplido": true,
-      "justificacion": "string (cita/parafrasea evidencia del audio; si NO hay evidencia, explica por qué no)",
-      "mejora": "string (si no se cumple, propuesta concreta)",
-      "reconocimiento": "string (si se cumple de forma destacada)"
+      "justificacion": "string (si false, cita/parafrasea evidencia concreta)",
+      "mejora": "string",
+      "reconocimiento": "string"
     }
   ],
   "sugerencias_generales": ["string", "string", "string"],
@@ -254,7 +246,7 @@ Devuelve JSON ESTRICTAMENTE con el siguiente esquema (sin comentarios):
     "alertas": [
       { "tipo": "cuenta_no_oficial|contacto_numero_no_oficial|otro", "cita": "frase corta", "riesgo": "alto|medio|bajo" }
     ],
-    "observaciones": "string opcional"
+    "observaciones": "string"
   },
   "guion_check": {
     "frases_detectadas": ["string"],
@@ -267,11 +259,10 @@ REGLAS (OBLIGATORIAS):
 - LISTA CERRADA: Evalúa ÚNICAMENTE los atributos listados arriba. No inventes atributos ni cambies los nombres.
 - ORDEN: Mantén el MISMO orden que en "ATRIBUTOS ESPERADOS".
 - EVIDENCIA: Si marcas "cumplido": false, incluye una cita o parafraseo breve del fragmento específico.
-- CRÍTICOS (según REGLAS de criticidad del sistema): si NO hay evidencia explícita de cumplimiento, marca "cumplido": false (fail-closed) y explica. En NO críticos, si no hay evidencia clara, mantén "cumplido": true (pass-open) con mejora sugerida.
-- Para "Debate objeciones...", marca CUMPLE si hay identificación de la situación y propuesta alineada, aunque no se use texto literal del guion.
-- Si existen frases con el prefijo [OBLIGATORIO] en el guion, trátalas como indispensables al calcular "guion_check".
+- TRATAMIENTO DE CRÍTICOS: Los atributos recibidos se consideran CRÍTICOS; si no hay evidencia clara de cumplimiento → "cumplido": false (fail-closed).
+- Si existen frases [OBLIGATORIO] en el guion, trátalas como indispensables en "guion_check".
 - No incluyas texto fuera del JSON.
-- Si no hay evidencia clara de nombres, deja "agent_name" y/o "client_name" como cadena vacía ("").
+- Si no hay evidencia clara de nombres, deja "agent_name" y/o "client_name" como "".
 `.trim();
 
   // ---------- 1) Intentos normales (hasta 3) ----------
@@ -284,7 +275,7 @@ REGLAS (OBLIGATORIAS):
       if (!json || !Array.isArray(json.atributos)) {
         throw new Error('El modelo no devolvió JSON válido con "atributos".');
       }
-      const ret = finalizeFromLLM(json, matrix, transcriptText);
+      const ret = finalizeFromLLM(json, matrix, transcriptText, { onlyCritical: ONLY_CRITICAL });
       ret._debug_prompt = { had_script: hadScript, prompt_hash: promptHash, script_preview: scriptPreview };
       return ret;
     } catch (err) {
@@ -330,7 +321,7 @@ Devuelve el MISMO JSON solicitado antes (con TODOS los atributos y en el mismo o
     const raw  = completion.choices?.[0]?.message?.content || '';
     const json = forceJson(raw);
     if (json && Array.isArray(json.atributos)) {
-      const ret = finalizeFromLLM(json, matrix, smallTranscript);
+      const ret = finalizeFromLLM(json, matrix, smallTranscript, { onlyCritical: ONLY_CRITICAL });
       ret._debug_prompt = { had_script: hadScript, prompt_hash: promptHash, script_preview: scriptPreview };
       return ret;
     }
@@ -353,11 +344,9 @@ Devuelve el MISMO JSON solicitado antes (con TODOS los atributos y en el mismo o
       atributo: String(row?.atributo ?? row?.Atributo ?? '').trim(),
       categoria: String(row?.categoria ?? row?.Categoria ?? ''),
       peso: Number(row?.peso ?? row?.Peso ?? 0),
-      critico: isCriticalRow(row),
-      cumplido: isCriticalRow(row) ? false : true, // críticos -> false, no críticos -> true
-      justificacion: isCriticalRow(row)
-        ? 'No se encontró evidencia explícita de cumplimiento (fail-closed por criticidad).'
-        : 'No se evidencia incumplimiento',
+      critico: true, // la matriz ya viene filtrada a críticos
+      cumplido: false,
+      justificacion: 'No se encontró evidencia explícita de cumplimiento (fail-closed por criticidad).',
       mejora: null,
       reconocimiento: null
     }));
@@ -368,14 +357,14 @@ Devuelve el MISMO JSON solicitado antes (con TODOS los atributos y en el mismo o
       hallazgos: [],
       atributos: full,
       sugerencias_generales: [],
-      fraude: { alertas: [], observaciones: '' },
+      fraude: { alertas: detectFraudHeuristics(String(transcript || '')), observaciones: '' },
       _debug_prompt: { had_script: hadScript, prompt_hash: promptHash, script_preview: scriptPreview }
     };
   }
 }
 
 /** Une lo que devuelve el LLM con la matriz, garantizando TODOS los atributos en orden */
-function finalizeFromLLM(json, matrix, transcriptText = '') {
+function finalizeFromLLM(json, matrix, transcriptText = '', { onlyCritical = false } = {}) {
   const byName = new Map();
   for (const a of (json.atributos || [])) {
     const k = keyName(a?.atributo);
@@ -383,7 +372,6 @@ function finalizeFromLLM(json, matrix, transcriptText = '') {
     byName.set(k, a);
   }
 
-  // para usar reglas de guion
   const guionCheck = {
     frases_detectadas: Array.isArray(json?.guion_check?.frases_detectadas) ? json.guion_check.frases_detectadas : [],
     obligatorias_faltantes: Array.isArray(json?.guion_check?.obligatorias_faltantes) ? json.guion_check.obligatorias_faltantes : [],
@@ -398,19 +386,21 @@ function finalizeFromLLM(json, matrix, transcriptText = '') {
     const found = byName.get(keyName(nombre));
     const categoria = String(found?.categoria ?? (row?.categoria ?? row?.Categoria ?? '')).trim();
     const peso = Number(row?.peso ?? row?.Peso ?? 0);
-    const critico = isCriticalRow(row);
 
-    // Default: críticos fail-closed, no críticos pass-open
+    // En este punto, la matriz ya está filtrada a críticos/antifraude.
+    const critico = true;
+
+    // Default: críticos fail-closed
     let cumplido;
     if (typeof found?.cumplido === 'boolean') {
       cumplido = found.cumplido;
     } else {
-      cumplido = critico ? false : true;
+      cumplido = false;
     }
 
     let justif = (found?.justificacion || '').trim();
 
-    // --- Regla especial: "Usa guion establecido (completo)" se rige por obligatorias ---
+    // Regla especial de guion
     if (/usa\s+guion\s+establecido/i.test(nombre)) {
       if (guionCheck.obligatorias_faltantes.length > 0) {
         cumplido = false;
@@ -419,15 +409,14 @@ function finalizeFromLLM(json, matrix, transcriptText = '') {
         }
       } else {
         cumplido = true;
-        if (!justif) justif = 'Se cubren las frases obligatorias del guion; no se exige el 100% literal.';
+        if (!justif) justif = 'Se cubren las frases obligatorias del guion.';
       }
     }
 
     const defaultJustif = cumplido
-      ? 'No se evidencia incumplimiento'
-      : (critico
-          ? 'No se encontró evidencia explícita de cumplimiento (fail-closed por criticidad).'
-          : 'Incumplimiento detectado o evidencia insuficiente.');
+      ? 'Se evidencia cumplimiento del criterio.'
+      : 'No se encontró evidencia explícita de cumplimiento (fail-closed por criticidad).';
+
     const mejora = (found?.mejora ?? (cumplido ? null : 'Definir acciones concretas para cumplir el criterio.'));
 
     full.push({
@@ -457,6 +446,7 @@ function finalizeFromLLM(json, matrix, transcriptText = '') {
     if (clean.cita && !seen.has(k)) { seen.add(k); merge.push(clean); }
   }
 
+  // Saneamos salida general (lista cerrada; no arrastramos campos extra)
   return {
     agent_name: typeof json.agent_name === 'string' ? cleanName(json.agent_name) : '',
     client_name: typeof json.client_name === 'string' ? cleanName(json.client_name) : '',
@@ -468,7 +458,8 @@ function finalizeFromLLM(json, matrix, transcriptText = '') {
       alertas: merge,
       observaciones: typeof json?.fraude?.observaciones === 'string' ? json.fraude.observaciones : ''
     },
-    guion_check: guionCheck
+    guion_check: guionCheck,
+    _policy_only_critical: onlyCritical ? 1 : 0
   };
 }
 
@@ -513,7 +504,7 @@ ${transcriptText}
       max_tokens: BATCH_TOKENS,
       response_format: { type: 'json_object' },
       messages: [
-        { role: 'system', content: 'Responde SOLO el objeto JSON con "atributos". Debe existir evidencia citada si marcas false.' },
+        { role: 'system', content: 'Responde SOLO el objeto JSON con "atributos". Si marcas false, cita evidencia concreta. Lista cerrada.' },
         { role: 'user', content: batchUser }
       ],
     });
@@ -539,21 +530,19 @@ ${transcriptText}
 
     const categoria = String(found?.categoria ?? (row?.categoria ?? row?.Categoria ?? '')).trim();
     const peso = Number(row?.peso ?? row?.Peso ?? 0);
-    const critico = isCriticalRow(row);
+    const critico = true; // matriz filtrada
 
     let cumplido;
     if (typeof found?.cumplido === 'boolean') {
       cumplido = found.cumplido;
     } else {
-      cumplido = critico ? false : true;
+      cumplido = false; // fail-closed
     }
 
     const justif = (found?.justificacion || '').trim();
     const defaultJustif = cumplido
-      ? 'No se evidencia incumplimiento'
-      : (critico
-          ? 'No se encontró evidencia explícita de cumplimiento (fail-closed por criticidad).'
-          : 'Incumplimiento detectado o evidencia insuficiente.');
+      ? 'Se evidencia cumplimiento del criterio.'
+      : 'No se encontró evidencia explícita de cumplimiento (fail-closed por criticidad).';
     const mejora = (found?.mejora ?? (cumplido ? null : 'Definir acciones concretas para cumplir el criterio.'));
 
     return {
@@ -572,8 +561,8 @@ ${transcriptText}
   const miniUser = `
 A partir de la transcripción, devuelve ÚNICAMENTE este JSON:
 {
-  "agent_name": "string (si el agente se presenta; si no, \\"\\")",
-  "client_name": "string (si el cliente es nombrado; si no, \\"\\")",
+  "agent_name": "string",
+  "client_name": "string",
   "resumen": "100-200 palabras",
   "hallazgos": ["string","string","string"],
   "sugerencias_generales": ["string","string","string"]
@@ -611,7 +600,7 @@ ${transcriptText}
     }
   } catch { /* si falla, devolvemos vacío sin romper */ }
 
-  // En el modo por lotes, usamos solo la heurística local para fraude
+  // En el modo por lotes, usamos también la heurística local para fraude
   const fraude = {
     alertas: detectFraudHeuristics(transcriptText),
     observaciones: ''

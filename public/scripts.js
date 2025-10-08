@@ -22,14 +22,49 @@ function downloadBlob(blob, filename) {
 function escapeHtml(s) {
   return String(s || '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 }
-// Formatea una alerta de fraude {tipo,cita,riesgo} con 🚫🚫
 function formatFraudItem(f) {
   if (!f) return '';
-  if (typeof f === 'string') return `🚫🚫 ${escapeHtml(f)}`;
+  if (typeof f === 'string') return `🚫 ${escapeHtml(f)}`;
   const tipo   = String(f.tipo || '').replace(/_/g, ' ');
   const riesgo = (f.riesgo || 'alto').toUpperCase();
   const cita   = String(f.cita || '').trim();
-  return `🚫🚫 [${riesgo}] ${escapeHtml(tipo)}${cita ? ` — “${escapeHtml(cita)}”` : ''}`;
+  return `🚫 [${riesgo}] ${escapeHtml(tipo)}${cita ? ` — “${escapeHtml(cita)}”` : ''}`;
+}
+// Num seguro para UI (para la Nota)
+function numOrDash(n) {
+  const v = Number(n);
+  return Number.isFinite(v) ? Math.round(v) : '-';
+}
+
+// Helpers defensivos (evitan "Cannot set properties of null")
+function setTextById(id, text) { const el = $(id); if (el) el.textContent = text ?? ''; }
+function setHtmlById(id, html) { const el = $(id); if (el) el.innerHTML = html ?? ''; }
+function renderListById(id, items) {
+  const el = $(id);
+  if (!el) return;
+  if (!Array.isArray(items) || items.length === 0) { el.innerHTML = '<li>—</li>'; return; }
+  el.innerHTML = items.map(i => `<li>${i}</li>`).join('');
+}
+
+// ---- Helpers nuevos para tolerancia a estructuras anidadas/planas ----
+function pick(obj, path, fallback = undefined) {
+  if (!obj || !path) return fallback;
+  const parts = Array.isArray(path) ? path : String(path).split('.');
+  let cur = obj;
+  for (const p of parts) {
+    if (cur && Object.prototype.hasOwnProperty.call(cur, p)) {
+      cur = cur[p];
+    } else {
+      return fallback;
+    }
+  }
+  return cur;
+}
+function arr(x) { return Array.isArray(x) ? x : (x == null ? [] : [x]); }
+// Normaliza porAtributo (venga en meta.porAtributo o consolidado.porAtributo)
+function flattenPorAtrib(meta) {
+  const a = pick(meta, 'porAtributo') || pick(meta, 'consolidado.porAtributo') || [];
+  return Array.isArray(a) ? a : [];
 }
 
 // ---------- Tabs ----------
@@ -181,7 +216,6 @@ const $grpAvg     = $('grpAvg');
 const $grpResumen = $('grpResumen');
 const $grpHall    = $('grpHall');
 const $grpCrit    = $('grpCrit');
-const $grpNoCrit  = $('grpNoCrit');
 const $grpPlan    = $('grpPlan');
 
 // Fraude (grupo)
@@ -213,11 +247,11 @@ $formBatch?.addEventListener('submit', async (e) => {
   e.preventDefault();
   if (!$matrix?.files?.length || !$audios?.files?.length) { alert('Adjunta una matriz y al menos un audio.'); return; }
 
-  $progressCard.style.display = '';
-  $resultsCard.style.display  = 'none';
-  $listProgress.innerHTML     = '';
-  $lblProgress.textContent    = `0 / ${$audios.files.length}`;
-  $barProgress.style.width    = '0%';
+  if ($progressCard) $progressCard.style.display = '';
+  if ($resultsCard)  $resultsCard.style.display  = 'none';
+  if ($listProgress) $listProgress.innerHTML     = '';
+  if ($lblProgress)  $lblProgress.textContent    = `0 / ${$audios.files.length}`;
+  if ($barProgress)  $barProgress.style.width    = '0%';
 
   const fd = new FormData();
   fd.append('matrix', $matrix.files[0]);
@@ -254,20 +288,22 @@ function startSSE(jobId) {
 function updateProgressUI(p) {
   const total = Number(p.total || 0);
   const done  = Number(p.done || 0);
-  $lblProgress.textContent = `${done} / ${total}`;
+  if ($lblProgress) $lblProgress.textContent = `${done} / ${total}`;
   const pct = total ? Math.round((done / total) * 100) : 0;
-  $barProgress.style.width = `${pct}%`;
+  if ($barProgress) $barProgress.style.width = `${pct}%`;
 
-  const frag = document.createDocumentFragment();
-  (p.items || []).forEach((it, idx) => {
-    const d = document.createElement('div');
-    const st = it.status;
-    const icon = st === 'done' ? '✅' : (st === 'error' ? '❌' : '⏳');
-    d.textContent = `${icon} ${idx + 1}. ${it.name}`;
-    frag.appendChild(d);
-  });
-  $listProgress.innerHTML = '';
-  $listProgress.appendChild(frag);
+  if ($listProgress) {
+    const frag = document.createDocumentFragment();
+    (p.items || []).forEach((it, idx) => {
+      const d = document.createElement('div');
+      const st = it.status;
+      const icon = st === 'done' ? '✅' : (st === 'error' ? '❌' : '⏳');
+      d.textContent = `${icon} ${idx + 1}. ${it.name}`;
+      frag.appendChild(d);
+    });
+    $listProgress.innerHTML = '';
+    $listProgress.appendChild(frag);
+  }
 }
 
 async function loadBatchResult(jobId) {
@@ -282,70 +318,131 @@ async function loadBatchResult(jobId) {
 }
 
 function renderBatchResults(result) {
-  $resultsCard.style.display = '';
+  if ($resultsCard) $resultsCard.style.display = '';
 
   const items = (result.items || []).filter(it => it.status === 'done' && it.meta);
-  $countInd.textContent = String(items.length);
+  if ($countInd) $countInd.textContent = String(items.length);
 
-  $individualList.innerHTML = '';
+  if ($individualList) $individualList.innerHTML = '';
   items.forEach((it) => {
-    const m = it.meta;
+    const meta = it.meta || {};
 
-    // Normaliza alertas (objetos o strings)
-    let alertas = [];
-    if (Array.isArray(m?.alertasFraude)) alertas = m.alertasFraude;
-    else if (Array.isArray(m?.fraudeAlertas)) alertas = m.fraudeAlertas;
-    else if (Array.isArray(m?.fraude?.alertas)) alertas = m.fraude.alertas;
+    // --- Normalización de campos (flat y nested) ---
+    const analisis    = pick(meta, 'analisis') || pick(meta, 'analysis') || {};
+    const consolidado = pick(meta, 'consolidado') || pick(meta, 'scoring') || {};
 
-    const hasFraude = Array.isArray(alertas) && alertas.length > 0;
+    const agente  = pick(meta, 'agente') || pick(meta, 'agent') || pick(meta, 'metadata.agentName') || pick(analisis, 'agent_name') || '-';
+    const cliente = pick(meta, 'cliente') || pick(meta, 'client') || pick(meta, 'metadata.customerName') || pick(analisis, 'client_name') || '-';
+    const callId  = pick(meta, 'metadata.callId') || pick(meta, 'callId') || '';
+
+    const nota    = numOrDash(pick(meta, 'nota') ?? pick(consolidado, 'notaFinal'));
+
+    // Hallazgos: preferir analisis.hallazgos; fallback a meta.hallazgos
+    const hallazgos = pick(analisis, 'hallazgos') || pick(meta, 'hallazgos') || [];
+
+    // Afectados críticos: SIEMPRE desde scoring/analysis (backend), jamás de “texto”
+    const afectadosCriticos =
+      pick(consolidado, 'afectadosCriticos') ||
+      pick(analisis, 'afectadosCriticos') ||
+      pick(meta, 'afectadosCriticos') || [];
+
+    // No aplica (excluidos)
+    const noAplican =
+      pick(consolidado, 'noAplican') ||
+      pick(analisis, 'noAplican') ||
+      pick(meta, 'noAplican') || [];
+
+    // Plan de mejora por llamada (desde porAtributo donde cumplido=false con mejora)
+    const porAtrib = flattenPorAtrib(meta);
+    const mejoras = porAtrib
+      .filter(a => a && a.aplica !== false && a.cumplido === false && a.mejora)
+      .map(a => `<li><strong>${escapeHtml(a.atributo)}</strong>: ${escapeHtml(a.mejora)}</li>`);
+
+    // Transcripción marcada (mantener indentación)
+    const transcriptMarked = String(pick(meta, 'transcriptMarked') || '').trim();
+    const transcriptBlock = transcriptMarked
+      ? `<section style="margin:8px 0;">
+           <div style="font-weight:600;margin-bottom:4px;">Transcripción (tiempos y rol)</div>
+           <pre style="white-space:pre-wrap; font-family: ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:0.95rem;">${escapeHtml(transcriptMarked)}</pre>
+         </section>`
+      : '';
+
+    const resumen = pick(meta, 'resumen') || pick(analisis, 'resumen') || '';
 
     const det = document.createElement('details');
     det.innerHTML = `
-      <summary><b>${m.agente || '-'}</b> — ${m.cliente || '-'} · <span class="pill">Nota: ${m.nota ?? '-'}</span> · <small>${m.callId}</small></summary>
+      <summary><b>${escapeHtml(agente)}</b> — ${escapeHtml(cliente)} · <span class="pill">Nota: ${nota}</span> · <small>${escapeHtml(callId)}</small></summary>
       <div style="padding:8px 12px">
-        <p><b>Resumen:</b> ${m.resumen ? m.resumen : '(sin resumen)'}</p>
+        <p><b>Resumen:</b> ${resumen ? escapeHtml(resumen) : '(sin resumen)'}</p>
 
         <p><b>Hallazgos:</b></p>
-        <ul>${(m.hallazgos || []).map(h => `<li>${escapeHtml(h)}</li>`).join('')}</ul>
+        <ul>${(hallazgos || []).map(h => `<li>${escapeHtml(h)}</li>`).join('') || '<li>—</li>'}</ul>
 
-        <p><b>Afectados (críticos):</b> ${m.afectadosCriticos?.join(', ') || '—'}</p>
-        <p><b>Afectados (no críticos):</b> ${m.afectadosNoCriticos?.join(', ') || '—'}</p>
+        <p><b>Afectados (críticos, desde scoring):</b></p>
+        <ul>${(arr(afectadosCriticos).length ? arr(afectadosCriticos).map(a => `<li>${escapeHtml(a)}</li>`).join('') : '<li>—</li>')}</ul>
 
-        <p><b>Sugerencias:</b></p>
-        <ul>${(m.sugerencias || []).map(s => `<li>${escapeHtml(s)}</li>`).join('')}</ul>
+        <p><b>No aplica (excluidos del cómputo):</b></p>
+        <ul>${(arr(noAplican).length ? arr(noAplican).map(a => `<li>${escapeHtml(a)}</li>`).join('') : '<li>—</li>')}</ul>
 
-        ${hasFraude ? `
-          <div class="fraud-box">
-            <div class="fraud-title">Alertas de fraude</div>
-            <ul class="fraud-list">
-              ${alertas.map(a => `<li>${formatFraudItem(a)}</li>`).join('')}
-            </ul>
-          </div>` : ``}
+        ${mejoras.length ? `
+          <p><b>Plan de mejora:</b></p>
+          <ul>${mejoras.join('')}</ul>
+        ` : ''}
+
+        ${(() => {
+          // Render opcional: tabla compacta de porAtributo (útil para depurar NA vs incumplidos)
+          if (!porAtrib.length) return '';
+          const rows = porAtrib.map(a => {
+            const badge = (a.aplica === false || String(a.status||'').toUpperCase()==='NA') ? 'NA' : (a.cumplido ? '✅' : '❌');
+            const peso  = Number(a.peso ?? 0);
+            return `
+              <tr>
+                <td>${escapeHtml(a.atributo || '')}</td>
+                <td style="text-align:center">${badge}</td>
+                <td style="text-align:right">${peso}</td>
+                <td>${escapeHtml(a.justificacion || '')}</td>
+              </tr>
+            `;
+          }).join('');
+          return `
+            <details style="margin-top:10px;">
+              <summary style="cursor:pointer;font-weight:600;">Detalle por atributo</summary>
+              <div style="overflow:auto;">
+                <table class="mini">
+                  <thead><tr><th>Atributo</th><th>Estado</th><th>Peso</th><th>Justificación</th></tr></thead>
+                  <tbody>${rows}</tbody>
+                </table>
+              </div>
+            </details>
+          `;
+        })()}
+
+        ${transcriptBlock}
       </div>
     `;
-    $individualList.appendChild(det);
+    if ($individualList) $individualList.appendChild(det);
   });
 
   // Resumen grupal
   const g = result.group || {};
-  $grpTotal.textContent   = String(g.total ?? 0);
-  $grpAvg.textContent     = String(g.promedio ?? 0);
-  $grpResumen.textContent = g.resumen || '';
+  setTextById('grpTotal',   String(g.total ?? g.totalCalls ?? 0));
+  setTextById('grpAvg',     String(Number.isFinite(+g.promedio) ? Math.round(+g.promedio) : (g.averageScore ?? 0)));
+  setTextById('grpResumen', g.resumen || '');
 
-  $grpHall.innerHTML     = (g.topHallazgos || []).map(h => `<li>${escapeHtml(h)}</li>`).join('') || '<li>—</li>';
-  $grpCrit.textContent   = (g.atributosCriticos || []).join(', ') || '—';
-  $grpNoCrit.textContent = (g.atributosNoCriticos || []).join(', ') || '—';
-  $grpPlan.textContent   = g.planMejora || '';
+  if ($grpHall) $grpHall.innerHTML = (g.topHallazgos || g.hallazgos || []).map(h => `<li>${escapeHtml(h)}</li>`).join('') || '<li>—</li>';
 
-  // Fraude (grupo) — acepta varias formas
+  // Afectados críticos grupales (si el backend los resume)
+  const critGroup = g.atributosCriticos || g.afectadosCriticos || [];
+  setTextById('grpCrit',   Array.isArray(critGroup) ? critGroup.join(', ') : '—');
+  setTextById('grpPlan',   g.planMejora || '');
+
+  // Fraude (grupo)
   let topFraude = g.fraudeAlertasTop || g.topFraude || g.fraude || [];
   if (!Array.isArray(topFraude)) topFraude = [];
 
   const groupHasFraud = topFraude.length > 0;
 
-  if ($grpFraudeCard) {
-    $grpFraudeCard.style.display = groupHasFraud ? '' : 'none';
-  }
+  if ($grpFraudeCard) $grpFraudeCard.style.display = groupHasFraud ? '' : 'none';
   if ($grpFraudeList) {
     $grpFraudeList.innerHTML = groupHasFraud
       ? topFraude.map(x => `<li>${formatFraudItem(x)}</li>`).join('')
@@ -401,8 +498,9 @@ function renderSummaryCompatible(s) {
     );
     html += chips.join('') || '<span>—</span>';
   } else if (Array.isArray(s?.porCategoria)) {
+    // soporta forma nueva { categoria, cumplimiento: { porcentaje } }
     const chips = s.porCategoria.map(c =>
-      `<span class="pill">${c.atributo}: ${Math.round(c.porcentaje || 0)}%</span>`
+      `<span class="pill">${(c.categoria || c.atributo || 'Categoría')}: ${Math.round((c.cumplimiento?.porcentaje ?? c.porcentaje) || 0)}%</span>`
     );
     html += chips.join('') || '<span>—</span>';
   } else {
@@ -441,7 +539,7 @@ async function loadAudits() {
       const call  = it?.metadata?.callId || '-';
       const ag    = it?.metadata?.agentName    || it?.analisis?.agent_name  || '-';
       const cli   = it?.metadata?.customerName || it?.analisis?.client_name || '-';
-      const nota  = it?.consolidado?.notaFinal ?? '-';
+      const nota  = numOrDash(it?.consolidado?.notaFinal);
 
       const callId = it?.metadata?.callId || '';
       let reporteHtml = '—';

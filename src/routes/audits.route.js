@@ -67,6 +67,7 @@ function buildCallMarkdown(audit) {
   const meta = audit?.metadata || {};
   const an   = audit?.analisis  || {};
   const cons = audit?.consolidado || {};
+  const transcriptMarked = String(audit?.transcriptMarked || '').trim();
 
   const fecha = meta.timestamp ? new Date(meta.timestamp).toLocaleString() : '';
   const agente  = meta.agentName    || an.agent_name  || '-';
@@ -81,19 +82,27 @@ function buildCallMarkdown(audit) {
   lines.push(`**Agente:** ${agente}  `);
   lines.push(`**Cliente:** ${cliente}  `);
   lines.push(`**Nota:** ${nota}/100`);
+
   lines.push('\n## Resumen\n');
   lines.push(an?.resumen || '—');
-  lines.push('\n## Hallazgos');
+
+  // <<< NUEVO: Transcripción con tiempos/rol >>>
+  lines.push('\n## Transcripción (tiempos y rol)\n');
+  lines.push(transcriptMarked || '(no disponible con este proveedor)');
+
+  lines.push('\n\n## Hallazgos');
   if (Array.isArray(an?.hallazgos) && an.hallazgos.length) {
     for (const h of an.hallazgos) lines.push(`- ${h}`);
   } else {
     lines.push('- —');
   }
+
   lines.push('\n## Afectados (críticos)');
   lines.push(criticos.length ? `- ${criticos.join('\n- ')}` : '- —');
 
-  lines.push('\n## Afectados (no críticos)');
-  lines.push(noCriticos.length ? `- ${noCriticos.join('\n- ')}` : '- —');
+  // Ya no listamos “no críticos” por tu configuración
+  // lines.push('\n## Afectados (no críticos)');
+  // lines.push(noCriticos.length ? `- ${noCriticos.join('\n- ')}` : '- —');
 
   lines.push('\n## Sugerencias');
   if (Array.isArray(an?.sugerencias_generales) && an.sugerencias_generales.length) {
@@ -166,7 +175,7 @@ router.get('/audits/export.xlsx', (req, res) => {
   }
 
   const rows = items.map(it => {
-    const { criticos, noCriticos } = splitAffected(it?.consolidado);
+    const { criticos } = splitAffected(it?.consolidado);
     const fecha = it?.metadata?.timestamp ? new Date(it.metadata.timestamp).toLocaleString() : '';
     const agente  = it?.metadata?.agentName    || it?.analisis?.agent_name  || '';
     const cliente = it?.metadata?.customerName || it?.analisis?.client_name || '';
@@ -179,7 +188,6 @@ router.get('/audits/export.xlsx', (req, res) => {
       'Agente': agente,
       'Cliente': cliente,
       'Nota': it?.consolidado?.notaFinal ?? '',
-      'Atributos no críticos afectados': noCriticos.join(', '),
       'Atributos críticos afectados': criticos.join(', '),
       'Alerta de fraude': fraude,
       'Resumen': resumen
@@ -192,7 +200,6 @@ router.get('/audits/export.xlsx', (req, res) => {
     'Agente',
     'Cliente',
     'Nota',
-    'Atributos no críticos afectados',
     'Atributos críticos afectados',
     'Alerta de fraude',
     'Resumen',
@@ -225,13 +232,12 @@ router.get('/audits/files/batches/:jobId.md', (req, res) => {
   res.send(fs.readFileSync(abs, 'utf-8'));
 });
 
-// 2) resolvedor genérico y **fallback dinámico** si no existe el archivo .md
+// 2) resolvedor genérico y fallback dinámico si no existe el archivo .md
 router.get('/audits/files/:name', (req, res) => {
-  const base = path.basename(req.params.name);     // ej: 1759..._1.md
-  const callId = base.replace(/\.md$/,'');         // ej: 1759..._1
+  const base = path.basename(req.params.name);
+  const callId = base.replace(/\.md$/,'');
   const withExt = base.endsWith('.md') ? base : `${base}.md`;
 
-  // Candidatos comunes
   const candidates = [
     resolveReportFile(base),
     resolveReportFile(req.params.name),
@@ -245,19 +251,18 @@ router.get('/audits/files/:name', (req, res) => {
     return res.send(fs.readFileSync(existing, 'utf-8'));
   }
 
-  // ---- Fallback: construir MD al vuelo desde el JSON de /data/audits/YYYY/MM ----
+  // Fallback: construir MD al vuelo desde los JSON guardados
   try {
-    const items = listAudits(); // lee todos los JSON ya guardados
+    const items = listAudits();
     const audit = items.find(a => String(a?.metadata?.callId || '') === callId);
     if (!audit) return res.status(404).send('Reporte no encontrado');
 
     const md = buildCallMarkdown(audit);
 
-    // (opcional) cachear para futuras visitas
     try {
       ensureDir(REPORTS_CALL_DIR);
       fs.writeFileSync(path.join(REPORTS_CALL_DIR, `${callId}.md`), md, 'utf-8');
-    } catch { /* si no se puede escribir, igual devolvemos el MD */ }
+    } catch { /* ignore */ }
 
     res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
     return res.send(md);

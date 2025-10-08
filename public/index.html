@@ -16,120 +16,124 @@
     </nav>
   </header>
 
-    <!-- ==================== TRANSCRIBIR ==================== -->
+  <!-- ==================== TRANSCRIBIR ==================== -->
   <section id="viewTranscribe" style="display:none">
-  <div class="card">
-    <h2>Transcribir llamadas</h2>
-    <p>Sube uno o varios audios. Si subes 1, se descargará un .txt. Si subes varios, se descargará un .zip con todos los .txt.</p>
+    <div class="card">
+      <h2>Transcribir llamadas</h2>
+      <p>Sube uno o varios audios. Si subes 1, se descargará un .txt. Si subes varios, se descargará un .zip con todos los .txt.</p>
 
-    <form id="formTranscribe" enctype="multipart/form-data">
-      <div class="row">
-        <label>Audios</label>
-        <input id="txAudios" type="file" name="audios" accept=".wav,.mp3,.m4a,.flac,.ogg" multiple required />
-      </div>
+      <form id="formTranscribe" enctype="multipart/form-data">
+        <div class="row">
+          <label for="txAudios">Audios</label>
+          <input id="txAudios" type="file" name="audios" accept=".wav,.mp3,.m4a,.flac,.ogg" multiple required />
+        </div>
 
-      <div class="row">
-        <label>Proveedor</label>
-        <select id="txProvider" name="provider">
-          <option value="faster">Faster-Whisper</option>
-          <option value="openai">OpenAI</option>
+        <div class="row">
+          <label for="txProvider">Proveedor</label>
+          <select id="txProvider" name="provider">
+            <option value="faster">Faster-Whisper</option>
+            <option value="openai">OpenAI</option>
+          </select>
+        </div>
+
+        <div class="row">
+          <button id="btnTranscribe" class="primary" type="submit">Transcribir</button>
+        </div>
+      </form>
+
+      <p id="txStatus" class="muted"></p>
+      <a id="txDownloadLink" href="#" download style="display:none">Descargar de nuevo</a>
+    </div>
+  </section>
+
+  <!-- ==================== ANALIZAR ==================== -->
+  <section id="viewAnalyze">
+    <form id="formBatch" enctype="multipart/form-data">
+      <fieldset>
+        <legend>Cargar bloque</legend>
+
+        <label for="provider"><b>Modo de transcripción</b></label>
+        <select id="provider" name="provider">
+          <option value="faster">Local (Faster-Whisper)</option>
+          <option value="openai">OpenAI Whisper (cloud)</option>
         </select>
-      </div>
-      <div>  </div>
-      <div class="row">
-        <button id="btnTranscribe" class="primary" type="submit">Transcribir</button>
-      </div>
+
+        <label for="matrix">Matriz (.xlsx)</label>
+        <input id="matrix" name="matrix" type="file" accept=".xlsx" required />
+
+        <label for="audios">Audios (múltiples)</label>
+        <input id="audios" name="audios" type="file" accept=".mp3,.wav,.m4a,audio/*" multiple required />
+
+        <div class="field">
+          <label for="scriptFile">Guion de la campaña (.txt / .md, opcional)</label>
+          <input id="scriptFile" name="script" type="file" accept=".txt,.md,.pdf">
+          <small>Si lo adjuntas, se validará el uso del guion y las políticas específicas.</small>
+        </div>
+
+        <div class="field">
+          <label for="metodologia"><b>Metodología</b></label>
+          <select id="metodologia" name="metodologia" required>
+            <option value="">Selecciona una metodologia</option>
+            <option value="cobranza">Cobranza</option>
+            <option value="servicio">Servicio</option>
+            <option value="comercial">Comercial</option>
+          </select>
+        </div>
+
+        <div class="field" id="cartera-field" style="display:none">
+          <label for="cartera"><b>Cartera</b></label>
+          <select id="cartera" name="cartera">
+            <option value="">Selecciona cartera</option>
+          </select>
+        </div>
+
+        <div style="display:flex;gap:8px;margin-top:8px">
+          <button class="primary" type="submit">Analizar</button>
+          <button class="muted" type="reset">Limpiar</button>
+        </div>
+      </fieldset>
     </form>
 
-    <p id="txStatus" class="muted"></p>
-    <a id="txDownloadLink" href="#" download style="display:none">Descargar de nuevo</a>
-  </div>
-</section>
-  <!-- ==================== ANALIZAR ==================== -->
-<section id="viewAnalyze">
-  <form id="formBatch">
-    <fieldset>
-      <legend>Cargar bloque</legend>
-      <label for="provider"><b>Modo de transcripción</b></label>
-      <select id="provider" name="provider">
-        <option value="faster">Local (Faster-Whisper)</option>
-        <option value="openai">OpenAI Whisper (cloud)</option>
-      </select>
-
-      <label for="matrix">Matriz (.xlsx)</label>
-      <input id="matrix" name="matrix" type="file" accept=".xlsx" required />
-
-      <label for="audios">Audios (múltiples)</label>
-      <input id="audios" name="audios" type="file" accept=".mp3,.wav,.m4a,audio/*" multiple required />
-
-      <div class="field">
-        <label for="script">Guion de la campaña (.txt / .md, opcional)</label>
-        <input id="script" name="script" type="file" accept=".txt,.md,.pdf">
-        <small>Si lo adjuntas, se validará el uso del guion y las políticas específicas.</small>
+    <div id="progressCard" style="display:none;border:1px solid #ddd;border-radius:12px;padding:16px;margin-top:12px">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <b>Progreso del lote</b>
+        <span id="lblProgress">0 / 0</span>
       </div>
-
-      <div class="field">
-        <label for="metodologia"><b>Metodología</b></label>
-        <select id="metodologia" name="metodologia" required>
-          <option value="">Selecciona una metodologia</option>
-          <option value="cobranza">Cobranza</option>
-          <option value="servicio">Servicio</option>
-          <option value="comercial">Comercial</option>
-        </select>
+      <div style="background:#eee;border-radius:999px;height:10px;margin:8px 0">
+        <div id="barProgress" style="background:#22c55e;height:10px;border-radius:999px;width:0%"></div>
       </div>
-
-      <div class="field" id="cartera-field" style="display:none">
-        <label for="cartera"><b>Cartera</b></label>
-        <select id="cartera" name="cartera">
-          <option value="">Selecciona cartera</option>
-        </select>
-      </div>
-
-      <div style="display:flex;gap:8px;margin-top:8px">
-        <button class="primary" type="submit">Analizar</button>
-        <button class="muted" type="reset">Limpiar</button>
-      </div>
-    </fieldset>
-  </form>
-
-  <div id="progressCard" style="display:none;border:1px solid #ddd;border-radius:12px;padding:16px;margin-top:12px">
-    <div style="display:flex;justify-content:space-between;align-items:center">
-      <b>Progreso del lote</b>
-      <span id="lblProgress">0 / 0</span>
+      <div id="listProgress" style="max-height:180px;overflow:auto;font-size:14px"></div>
     </div>
-    <div style="background:#eee;border-radius:999px;height:10px;margin:8px 0">
-      <div id="barProgress" style="background:#22c55e;height:10px;border-radius:999px;width:0%"></div>
+
+    <div id="resultsCard" style="display:none;margin-top:16px">
+      <h2>Resultados del bloque</h2>
+
+      <details id="detIndividual" style="margin:8px 0">
+        <summary><b>Ver resultados individuales</b> <span id="countInd" class="pill" style="margin-left:6px">0</span></summary>
+        <div id="individualList" style="margin-top:8px;display:flex;flex-direction:column;gap:8px"></div>
+      </details>
+
+      <fieldset>
+        <legend>Resumen grupal</legend>
+        <p><b>Total:</b> <span id="grpTotal">-</span> &nbsp; <b>Promedio:</b> <span id="grpAvg">-</span></p>
+        <p id="grpResumen" style="white-space:pre-wrap"></p>
+
+        <h4>Hallazgos más comunes</h4>
+        <ul id="grpHall"></ul>
+
+        <h4>Atributos afectados</h4>
+        <p><b>Críticos:</b> <span id="grpCrit">—</span></p>
+
+        <div id="grpFraudeCard" class="fraud-box">
+          <div class="fraud-title">Alertas de fraude (grupo)</div>
+          <ul id="grpFraudeList" class="fraud-list"></ul>
+        </div>
+
+        <h4>Plan de mejora</h4>
+        <pre id="grpPlan" style="white-space:pre-wrap"></pre>
+      </fieldset>
     </div>
-    <div id="listProgress" style="max-height:180px;overflow:auto;font-size:14px"></div>
-  </div>
-
-  <div id="resultsCard" style="display:none;margin-top:16px">
-    <h2>Resultados del bloque</h2>
-
-    <details id="detIndividual" style="margin:8px 0">
-      <summary><b>Ver resultados individuales</b> <span id="countInd" class="pill" style="margin-left:6px">0</span></summary>
-      <div id="individualList" style="margin-top:8px;display:flex;flex-direction:column;gap:8px"></div>
-    </details>
-
-    <fieldset>
-      <legend>Resumen grupal</legend>
-      <p><b>Total:</b> <span id="grpTotal">-</span> &nbsp; <b>Promedio:</b> <span id="grpAvg">-</span></p>
-      <p id="grpResumen" style="white-space:pre-wrap"></p>
-
-      <h4>Hallazgos más comunes</h4>
-      <ul id="grpHall"></ul>
-      <h4>Atributos afectados</h4>
-      <p><b>Críticos:</b> <span id="grpCrit">—</span></p>
-      <p><b>No críticos:</b> <span id="grpNoCrit">—</span></p>
-      <div id="grpFraudeCard"class="fraud-box">
-        <div class="fraud-title">Alertas de fraude (grupo)</div>
-        <ul id="grpFraudeList" class="fraud-list"></ul>
-      </div>
-      <h4>Plan de mejora</h4>
-      <pre id="grpPlan" style="white-space:pre-wrap"></pre>
-    </fieldset>
-  </div>
-</section>
+  </section>
 
   <!-- ==================== CONSOLIDADO ==================== -->
   <section id="viewConsolidado" style="display:none">
@@ -138,10 +142,21 @@
       <a id="btnExport" href="/audits/export.xlsx" target="_blank"><button>Exportar Excel</button></a>
       <a id="btnExportJson" href="/audits/export.json" target="_blank"><button>Exportar JSON</button></a>
     </div>
+
     <div id="summary" style="margin-top:16px"></div>
+
     <h3>Auditorías</h3>
     <table id="tbl">
-      <thead><tr><th>Fecha</th><th>Call ID</th><th>Agente</th><th>Cliente</th><th>Nota</th><th>Reporte</th></tr></thead>
+      <thead>
+        <tr>
+          <th>Fecha</th>
+          <th>Call ID</th>
+          <th>Agente</th>
+          <th>Cliente</th>
+          <th>Nota</th>
+          <th>Reporte</th>
+        </tr>
+      </thead>
       <tbody></tbody>
     </table>
   </section>

@@ -11,7 +11,7 @@ import fs from 'fs';
 import path from 'path';
 
 import { parseMatrixFromXlsx } from '../services/matrixService.js';
-import { transcribeAudio } from '../services/transcriptionService.js';
+import { transcribeAudio, formatTranscriptLinesMono } from '../services/transcriptionService.js';
 import { analyzeTranscriptWithMatrix } from '../services/analysisService.js';
 import { scoreFromMatrix } from '../services/scoringService.js';
 import { saveAudit } from '../services/persistService.js';
@@ -34,21 +34,40 @@ const REPORTS_BATCH_DIR = path.resolve('reports', 'batches');
 
 // ---- Helpers
 function ensureDir(d) { if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true }); }
-function makeJobId() {
-  return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
-}
-function payload(job) {
-  return { status: job.status, total: job.total, done: job.done, items: job.items, group: job.group ?? null };
-}
-function notify(job) {
-  job.em?.emit('progress', payload(job));
-}
+function makeJobId() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
+function payload(job) { return { status: job.status, total: job.total, done: job.done, items: job.items, group: job.group ?? null }; }
+function notify(job) { job.em?.emit('progress', payload(job)); }
 function toNum(x) { const n = Number(x); return Number.isFinite(n) ? n : 0; }
-function cleanName(x = '') {
-  return String(x).trim().replace(/^(señor(?:a)?|sr\.?|sra\.?|srta\.?|don|doña)\s+/i, '').trim();
+function cleanName(x = '') { return String(x).trim().replace(/^(señor(?:a)?|sr\.?|sra\.?|srta\.?|don|doña)\s+/i, '').trim(); }
+
+// === Config filtro SOLO críticos/antifraude (consistente con /analyze)
+const ONLY_CRITICAL = String(process.env.ANALYZE_ONLY_CRITICAL || '0') !== '0';
+const envCsv = (name, fb='') => String(process.env[name] ?? fb).split(',').map(s=>s.trim().toLowerCase()).filter(Boolean);
+function isCriticalOrAntifraud(row) {
+  const s = (v)=>String(v??'').trim().toLowerCase();
+  const criterio  = s(row?.criterio);
+  const categoria = s(row?.categoria ?? row?.Categoría);
+  const tipo      = s(row?.tipo ?? row?.Tipo);
+  const peso      = Number(row?.peso ?? row?.Peso ?? row?.PESO ?? 0);
+  const byWeight  = String(process.env.CRITICAL_BY_WEIGHT ?? '1') !== '0';
+  const thr       = Number(process.env.CRITICAL_WEIGHT_VALUE ?? process.env.CRITICAL_WEIGHT_THRESHOLD ?? 100);
+  const nameKw    = envCsv('CRITICAL_NAME_KEYWORDS','tratamiento de datos,habeas data,autorización datos,consentimiento,legal,ley 1581');
+  const catKw     = envCsv('CRITICAL_CATEGORY_KEYWORDS','crítico,critico,legal,obligatorio,compliance');
+  const nonKw     = envCsv('NONCRITICAL_HINT_WORDS','opcional,no obligatorio,preferible,ideal');
+
+  if (row?.critico === true)  return true;
+  if (row?.critico === false) return false;
+  if (nonKw.some(w => criterio.includes(w))) return false;
+  if (catKw.some(w => categoria.includes(w))) return true;
+  if (nameKw.some(w => s(row?.atributo ?? row?.Atributo).includes(w))) return true;
+  if (byWeight && Number.isFinite(peso) && peso >= thr) return true;
+
+  const esAF = ['antifraude','anti-fraude','alerta antifraude','alertas antifraude']
+    .some(k => tipo.includes(k) || categoria.includes(k));
+  return esAF;
 }
 
-// Criticidad de atributos
+// Criticidad de atributos (para compactación)
 function isCritical(attr) {
   if (!attr || typeof attr !== 'object') return false;
   if (typeof attr.critico === 'boolean') return attr.critico;
@@ -59,7 +78,7 @@ function isCritical(attr) {
   return Number.isFinite(peso) && peso >= thr;
 }
 
-// Compacta lo que enviaremos al front (sin transcripción completa)
+// Compacta lo que enviaremos al front (añadimos transcriptMarked y nota robusta)
 function compactAuditForFront(audit) {
   const afectNoCrit = [];
   const afectCrit   = [];
@@ -80,18 +99,22 @@ function compactAuditForFront(audit) {
       })
     : [];
 
+  const notaFinal = Number(audit?.consolidado?.notaFinal);
+  const notaSafe = Number.isFinite(notaFinal) ? Math.round(notaFinal) : null;
+
   return {
     callId: audit?.metadata?.callId || '',
     timestamp: audit?.metadata?.timestamp || Date.now(),
     agente: audit?.metadata?.agentName || audit?.analisis?.agent_name || '-',
     cliente: audit?.metadata?.customerName || audit?.analisis?.client_name || '-',
-    nota: audit?.consolidado?.notaFinal ?? 0,
+    nota: notaSafe,
     resumen: audit?.analisis?.resumen || '',
     hallazgos: Array.isArray(audit?.analisis?.hallazgos) ? audit.analisis.hallazgos : [],
     sugerencias: Array.isArray(audit?.analisis?.sugerencias_generales) ? audit.analisis.sugerencias_generales : [],
     afectadosNoCriticos: afectNoCrit,
     afectadosCriticos: afectCrit,
-    alertasFraude
+    alertasFraude,
+    transcriptMarked: audit?.transcriptMarked || ''
   };
 }
 
@@ -100,20 +123,15 @@ function buildGroupSummary(itemsCompact) {
   const total = itemsCompact.length || 0;
   const promedio = total ? Math.round(itemsCompact.reduce((acc, it) => acc + toNum(it.nota), 0) / total) : 0;
 
-  // Top hallazgos/sugerencias
   const hallFreq = new Map();
   const sugFreq  = new Map();
   const critMap  = new Map();
-  const noCritMap= new Map();
-  // NUEVO: fraude
   const fraudeMap = new Map();
 
   for (const it of itemsCompact) {
     (it.hallazgos || []).forEach(h => hallFreq.set(h, (hallFreq.get(h) || 0) + 1));
     (it.sugerencias || []).forEach(s => sugFreq.set(s, (sugFreq.get(s) || 0) + 1));
     (it.afectadosCriticos || []).forEach(a => critMap.set(a, (critMap.get(a) || 0) + 1));
-    (it.afectadosNoCriticos || []).forEach(a => noCritMap.set(a, (noCritMap.get(a) || 0) + 1));
-    // Acumula alertas de fraude (ya vienen como strings formateados)
     (it.alertasFraude || []).forEach(f => {
       const k = String(f).trim();
       if (!k) return;
@@ -127,8 +145,7 @@ function buildGroupSummary(itemsCompact) {
   const topHallazgos   = top(hallFreq, 10);
   const topSugerencias = top(sugFreq, 10);
   const topCriticos    = top(critMap, 10);
-  const topNoCriticos  = top(noCritMap, 10);
-  const fraudeAlertasTop = top(fraudeMap, 10); // ← NUEVO
+  const fraudeAlertasTop = top(fraudeMap, 10);
 
   const resumenGrupo = [
     `Se auditaron ${total} llamadas.`,
@@ -136,9 +153,7 @@ function buildGroupSummary(itemsCompact) {
     topCriticos.length
       ? `Atributos críticos más afectados: ${topCriticos.slice(0, 5).join(', ')}.`
       : `Sin atributos críticos recurrentes.`,
-    fraudeAlertasTop.length
-      ? `Se detectaron alertas de posible fraude en varias llamadas (ver Top).`
-      : ''
+    fraudeAlertasTop.length ? `Se detectaron alertas de posible fraude en varias llamadas (ver Top).` : ''
   ].filter(Boolean).join(' ');
 
   const planMejora = [
@@ -152,9 +167,7 @@ function buildGroupSummary(itemsCompact) {
     resumen: resumenGrupo,
     topHallazgos,
     atributosCriticos: topCriticos.map(s => s.replace(/\s+\(\d+\)$/, '')),
-    atributosNoCriticos: topNoCriticos.map(s => s.replace(/\s+\(\d+\)$/, '')),
     planMejora,
-    // NUEVO: se envía al front
     fraudeAlertasTop
   };
 }
@@ -185,12 +198,6 @@ function buildBatchMarkdown(jobId, group, itemsCompact) {
     for (const a of group.atributosCriticos) lines.push(`- ${a}`);
     lines.push('');
   }
-  if ((group.atributosNoCriticos || []).length) {
-    lines.push('## Atributos No Críticos más afectados');
-    for (const a of group.atributosNoCriticos) lines.push(`- ${a}`);
-    lines.push('');
-  }
-  // NUEVO: sección de fraude grupal
   if ((group.fraudeAlertasTop || []).length) {
     lines.push('## Alertas de fraude (grupo)');
     for (const f of group.fraudeAlertasTop) lines.push(`- ${f}`);
@@ -203,19 +210,13 @@ function buildBatchMarkdown(jobId, group, itemsCompact) {
     lines.push(`**Fecha:** ${fecha}  `);
     lines.push(`**Agente:** ${it.agente || '-'}  `);
     lines.push(`**Cliente:** ${it.cliente || '-'}  `);
-    if (it.resumen) {
-      lines.push('');
-      lines.push(it.resumen);
-      lines.push('');
-    }
+    if (it.resumen) { lines.push(''); lines.push(it.resumen); lines.push(''); }
     if ((it.hallazgos || []).length) {
       lines.push('**Hallazgos:**');
       for (const h of it.hallazgos) lines.push(`- ${h}`);
       lines.push('');
     }
-    const nc = (it.afectadosNoCriticos || []).join(', ');
     const c  = (it.afectadosCriticos || []).join(', ');
-    lines.push(`**Afectados no críticos:** ${nc || '—'}`);
     lines.push(`**Afectados críticos:** ${c || '—'}`);
     const af = (it.alertasFraude || []).join(' • ');
     lines.push(`**Alertas de fraude:** ${af || '—'}`);
@@ -232,7 +233,7 @@ router.post(
   upload.fields([
     { name: 'matrix',  maxCount: 1 },
     { name: 'audios',  maxCount: Number(process.env.BATCH_MAX_FILES || 2000) },
-    { name: 'script',  maxCount: 1 } // archivo de guion opcional
+    { name: 'script',  maxCount: 1 }
   ]),
   async (req, res) => {
     try {
@@ -240,11 +241,15 @@ router.post(
         return res.status(400).json({ error: 'Adjunta "matrix" (.xlsx) y al menos un archivo en "audios"' });
       }
 
-      // 1) Parse matriz
+      // 1) Parse matriz (+ filtro solo críticos/AF si aplica)
       const matrixBuf = req.files.matrix[0].buffer;
-      const matrix = parseMatrixFromXlsx(matrixBuf);
-      if (!Array.isArray(matrix) || matrix.length === 0) {
+      const rawMatrix = parseMatrixFromXlsx(matrixBuf);
+      if (!Array.isArray(rawMatrix) || rawMatrix.length === 0) {
         return res.status(422).json({ error: 'Matriz inválida o vacía' });
+      }
+      const matrix = ONLY_CRITICAL ? rawMatrix.filter(isCriticalOrAntifraud) : rawMatrix;
+      if (ONLY_CRITICAL && matrix.length === 0) {
+        return res.status(400).json({ error: 'La matriz quedó vacía tras filtrar a críticos/antifraude' });
       }
 
       // 1.b) Leer GUION (opcional)
@@ -288,22 +293,24 @@ router.post(
         const metodologia  = String(req.body.metodologia || '');
         const cartera      = String(req.body.cartera || '');
 
-        // Prompt base por campaña
+        // Prompt base por campaña + refuerzo only-critical
         const baseCampaignPrompt =
           (metodologia === 'cobranza' && cartera === 'carteras_bogota')
             ? [
                 'Analiza la auditoría para Carteras Propias Bogotá siguiendo lineamientos de negociación, objeciones y formalidad.',
                 'Reglas específicas:',
-                '- Cobro escalonado (CUMPLE) solo si se ofrece primero un VALOR CAPITAL (saldo/valor total o monto alto) y luego al menos UNA alternativa con DESCUENTO explícito sobre ese capital (porcentaje o cifra menor).',
-                '- No penalizar por mencionar “plan de pagos/cuotas” si NO hay evidencia de que omitió el valor capital primero.',
-                '- Debate objeciones: considerar situaciones típicas del cliente (Salud, Desempleo, Disminución de ingresos, Ya pagué a la entidad). CUMPLE si el agente identifica la situación concreta y responde con argumentos alineados.',
+                '- Informa al cliente beneficios y consecuencias de no pago Objetivo del criterio: Verificar que el agente eduque al titular explicando, en la misma llamada, al menos 1 beneficio de pagar a tiempo y al menos 1 consecuencia de no pagar. El foco es educación financiera, no solo “venta” de la alternativa. Regla de decisión CUMPLE (APLICA=TRUE) si se detecta evidencia textual de ambos: Beneficio(s) de pagar a tiempo / mantenerse al día (≥1) Consecuencia(s) de no pagar / incurrir en mora (≥1) NO CUMPLE (APLICA=TRUE) si: Menciona solo beneficios o solo consecuencias (falta una de las dos partes). Se limita a pedir pago/confirmar pago sin educación financiera (no hay beneficios/consecuencias). Presenta “beneficios del descuento u oferta” (ej.: “pagaría menos”, “le queda en X”) sin explicar beneficios de la conducta de pago (historial, paz y salvo, etc.). NO APLICA (APLICA=FALSE) si: La llamada es solo recordatorio de un compromiso previo (no se abrió espacio para educación). El cliente cuelga / corta o no permite continuidad impidiendo dar la explicación. La gestión es exclusivamente técnica (p. ej., verificación de datos / envío de soporte) sin ventana para educación.',
+                '- Cobro escalonado (CUMPLE) solo si se evidencia esta secuencia en la conversación: Primera oferta de un monto base equivalente al total u obligación sin descuento (el agente puede expresarlo como “valor total”, “saldo completo”, “valor original”, “monto sin descuento”, “lo que aparece en sistema”, “lo que figura en cartera”, “el valor completo de la deuda”, etc.; no es obligatorio que diga “capital”). Al menos una alternativa posterior con descuento explícito (el agente puede decir “descuento”, “rebaja”, “condonación parcial”, “pagar menos que el total”, “quedaría en…”, “se lo dejo en…”, “podría cancelarlo por…”), dejando claro que el segundo monto es inferior al monto base. Marca NO APLICA si: Solo se ofrece un plan en cuotas (mismo total prorrateado) sin reducción del total. Se menciona un monto “más bajo” sin relacionarlo con el total u obligación inicial. Hay descuento pero no se presentó antes un monto base sin descuento. Para CUMPLE, exige evidencia textual de ambos elementos: (a) primera oferta base (sin descuento) y (b) oferta posterior con descuento, en ese orden.',
+                '- Debate objeciones: CUMPLE si el agente identifica la situación y propone alternativa alineada.'
               ].join('\n')
             : (metodologia === 'cobranza' && cartera === 'carteras_medellin')
               ? 'Analiza la auditoría de la cartera Medellín siguiendo lineamientos de negociación, objeciones y formalidad.'
               : '';
 
-        // Adjuntar guion al prompt (si viene)
         const promptParts = [baseCampaignPrompt];
+        if (ONLY_CRITICAL) {
+          promptParts.push('REGLA: Ignora totalmente afectaciones NO críticas. Reporta únicamente ERRORES CRÍTICOS y ALERTAS ANTIFRAUDE.');
+        }
         if (scriptText) {
           promptParts.push('Guion de la campaña (extracto, usar para validar "uso de guion" y consistencia):\n' + scriptText);
         }
@@ -322,12 +329,22 @@ router.post(
               { provider, mode, agentChannel }
             );
 
-            // b) Analizar (inyectando prompt con guion si existe)
+            // a.1) Transcripción marcada (mm:ss Rol: …) para MONO
+            let transcriptMarked = '';
+            if (transcript && typeof transcript === 'object') {
+              if (Array.isArray(transcript.linesRoleLabeled) && transcript.linesRoleLabeled.length) {
+                transcriptMarked = transcript.linesRoleLabeled.join('\n');
+              } else if (Array.isArray(transcript.segments) && transcript.segments.length) {
+                transcriptMarked = formatTranscriptLinesMono(transcript.segments).join('\n');
+              }
+            }
+
+            // b) Analizar
             const analysis = await analyzeTranscriptWithMatrix({
               transcript,
               matrix,
               prompt: finalPrompt,
-              context: { metodologia, cartera }
+              context: { metodologia, cartera, onlyCritical: ONLY_CRITICAL }
             });
 
             // c) Scoring
@@ -347,9 +364,11 @@ router.post(
                 provider: provider || '(default .env)',
                 metodologia,
                 cartera,
-                timestamp: Date.now()
+                timestamp: Date.now(),
+                onlyCritical: ONLY_CRITICAL ? 1 : 0
               },
               transcript,
+              transcriptMarked, // se guarda en la auditoría
               analisis: {
                 ...analysis,
                 agent_name:  agentName || '',
@@ -359,7 +378,7 @@ router.post(
             };
             saveAudit(audit);
 
-            // e) Compact para front
+            // e) Compact para front (incluyendo transcriptMarked)
             const compact = compactAuditForFront(audit);
             job.items[i] = { name: f.originalname, status: 'done', callId, meta: compact };
             compactList.push(compact);
