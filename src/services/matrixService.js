@@ -10,12 +10,13 @@ export function parseMatrixFromXlsx(buffer) {
   const out = [];
 
   for (const row of rows) {
-    const atributo = String(row['Atributo'] || row['atributo'] || row['Attribute'] || row['Item'] || '').trim();
-    const categoria = String(row['Categoria'] || row['Categoría'] || row['categoria'] || row['Category'] || '').trim();
+    const atributo = String(row['Atributo'] || row['atributo'] || row['Attribute'] || row['Item'] || '' || null).trim();
+    
+    const categoria = String(row['Categoria'] || row['Categoría'] || row['categoria'] || row['Category'] || '' || null).trim();
     let pesoRaw = row['Peso'] ?? row['peso'] ?? row['Weight'] ?? row['valor'] ?? '';
     if (typeof pesoRaw === 'string') pesoRaw = pesoRaw.replace(',', '.').trim();
     const peso = Number(pesoRaw);
-    const criterio = String(row['Criterio'] || row['criterio'] || row['Criterion'] || row['Descripción'] || '').trim();
+    const criterio = String(row['Criterio'] || row['criterio'] || row['Criterion'] || row['Descripción'] || '' || null).trim();
     if (!atributo || !categoria || Number.isNaN(peso) || peso < 0) continue;
     out.push({ atributo, categoria, peso, ...(criterio ? { criterio } : {}) });
   }

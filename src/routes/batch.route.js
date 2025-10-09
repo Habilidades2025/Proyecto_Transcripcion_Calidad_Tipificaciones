@@ -346,7 +346,6 @@ router.post(
               prompt: finalPrompt,
               context: { metodologia, cartera, onlyCritical: ONLY_CRITICAL }
             });
-
             // c) Scoring
             const scoring = scoreFromMatrix(analysis, matrix);
 

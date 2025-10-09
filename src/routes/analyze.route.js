@@ -29,6 +29,7 @@ function s(v, def = '') { return (v == null ? def : String(v)).trim(); }
 /** --- Modos desde .env --- */
 const ONLY_CRITICAL  = String(process.env.ANALYZE_ONLY_CRITICAL || '0') !== '0';
 const STRICT_APPLICA = String(process.env.STRICT_APPLICA || '0') !== '0'; // si 1: por defecto aplica=false salvo evidencia
+const DEBUG_PROMPT   = String(process.env.DEBUG_PROMPT || '0') !== '0';   // si 1: devuelve promptEcho en la respuesta
 
 /** Normaliza lista separada por comas desde .env */
 function envCsv(name, fallback = '') {
@@ -55,10 +56,10 @@ function isCriticalOrAntifraud(row) {
   if (row?.critico === true)  return true;
   if (row?.critico === false) return false;
 
-  if (nonCritKw.some(w => s(row?.criterio).toLowerCase().includes(w))) return false;
+  if (nonCritKw.some(w => s(row?.criterio ?? row?.Criterio).toLowerCase().includes(w))) return false;
 
   if (catKw.some(w => categoria.includes(w))) return true;
-  if (nameKw.some(w => s(row?.atributo).toLowerCase().includes(w))) return true;
+  if (nameKw.some(w => s(row?.atributo ?? row?.Atributo).toLowerCase().includes(w))) return true;
 
   if (byWeight && Number.isFinite(peso) && peso >= thr) return true;
 
@@ -81,8 +82,7 @@ const RE_WHATS   = /whats\s*app|whatsapp/i;
 const OBJECTION_WORDS = [
   'no puedo','no me alcanza','no tengo','desemplead','trabajo informal','enfermo','muy caro',
   'mas adelante','más adelante','no estoy de acuerdo','ya pague','ya pagué','no voy a pagar','no confio','no confío',
-  'no recibi','no recibí','no me lleg','no cuento con','desocupad','sin empleo','reduccion de ingresos','reducción de ingresos',
-  'menos sueldo','no puedo trabajar','no consegui' 
+  'no recibi','no recibí','no me lleg','no cuento con','desocupad','sin empleo'
 ];
 
 function norm(t='') {
@@ -131,22 +131,41 @@ function hasFullScriptFlow(t) {
   const negoUObj = hasNegotiationEvidence(n) || hasObjectionEvidence(n);
   return (saludo && aviso && ofertas && negoUObj);
 }
-// *** NUEVO: evidencia de llamada tipo recordatorio ***
-function hasReminderEvidence(t) {
-  const n = norm(t);
-  return /\b(recordatorio|recordarle|le\s+recuerdo\s+que|recuerde\s+que|llamo\s+para\s+recordar|solamente\s+para\s+recordarle)\b/.test(n);
-}
 
 function isAttr(row, needle) {
   const a = norm(row?.atributo || row?.Atributo || '');
   return a.includes(norm(needle));
 }
 
+/* ======= util diagnóstico: matriz/guion/prompt ======= */
+function buildMatrixSchemaPreview(rows = []) {
+  if (!Array.isArray(rows) || rows.length === 0) return { columns: [], sample: [], totalRows: 0 };
+  const columns = Object.keys(rows[0] || {});
+  const sample  = rows.slice(0, 3);
+  return { columns, sample, totalRows: rows.length };
+}
+async function extractPdfTextSummary(fileBuffer, maxChars = 4000) {
+  try {
+    const pdfParseMod = await import('pdf-parse');
+    const pdfParse = pdfParseMod.default || pdfParseMod;
+    const data = await pdfParse(fileBuffer);
+    const text = String(data?.text || '').replace(/\s+\n/g, '\n').trim();
+    const clean = text.split('\n').map(l => l.trim()).filter(Boolean).join('\n');
+    const preview = clean.slice(0, 400);
+    return { ok: true, text: clean.slice(0, maxChars), chars: clean.length, preview };
+  } catch (e) {
+    console.warn('[SCRIPT][WARN] PDF parse error:', e?.message || e);
+    return { ok: false, error: e?.message || String(e), text: '', chars: 0, preview: '' };
+  }
+}
+
+/* ===================== RUTA ===================== */
 router.post(
   '/analyze',
   upload.fields([
     { name: 'matrix', maxCount: 1 },
-    { name: 'audio',  maxCount: 1 }
+    { name: 'audio',  maxCount: 1 },
+    { name: 'script', maxCount: 1 } // guion PDF opcional
   ]),
   async (req, res) => {
     try {
@@ -183,6 +202,7 @@ router.post(
           detail: 'No se extrajeron filas válidas (Atributo, Categoria, Peso)'
         });
       }
+      const debugMatrix = buildMatrixSchemaPreview(rawMatrix);
 
       // Filtro crítico/antifraude
       const matrix = ONLY_CRITICAL ? rawMatrix.filter(isCriticalOrAntifraud) : rawMatrix;
@@ -192,6 +212,25 @@ router.post(
           error: 'Matriz sin criterios críticos/antifraude',
           detail: 'La matriz quedó vacía tras filtrar; revisa Criticidad/Tipo/Categoría/Peso y tus keywords del .env'
         });
+      }
+
+      // --- 1.b) Guion PDF (opcional)
+      let scriptDiag = { received: false, mime: null, bytes: 0, parsedChars: 0, preview: '' };
+      let scriptText = '';
+      if (req.files?.script?.[0]) {
+        const f = req.files.script[0];
+        scriptDiag.received = true;
+        scriptDiag.mime = f.mimetype || null;
+        scriptDiag.bytes = f.size || 0;
+
+        const parsed = await extractPdfTextSummary(f.buffer, 4000);
+        if (parsed.ok) {
+          scriptText = parsed.text;
+          scriptDiag.parsedChars = parsed.chars;
+          scriptDiag.preview = parsed.preview;
+        } else {
+          scriptDiag.error = parsed.error || 'parse_failed';
+        }
       }
 
       // --- 2) Transcripción
@@ -223,8 +262,6 @@ router.post(
         : String(transcript || '');
 
       // --- 3) Prompt por campaña + reglas de aplicabilidad (para el LLM)
-      let analysisPrompt = '';
-
       const reglasAplicabilidad = `
 REGLAS DE APLICABILIDAD:
 - "Realiza el proceso completo de confirmación de la negociación":
@@ -243,14 +280,11 @@ REGLAS DE APLICABILIDAD:
   APLICA=TRUE cuando el flujo está completo (saludo/presentación + aviso de grabación + alternativas + negociación u objeciones).
   Si la gestión queda exploratoria y/o se deriva a WhatsApp sin negociación/objeciones => APLICA=FALSE.
 
-- "Llamadas de recordatorio":
-  Si la llamada es un RECORDATORIO y NO hay negociación cerrada ni consentimiento explícito, entonces:
-    • "Confirmación de la negociación" => APLICA=FALSE.
-    • "Autorización para contactarlo por diferentes medios" => APLICA=FALSE.
 Devuelve por atributo: { atributo, aplica: true|false, status: "OK"|"NA", cumplido: true|false|null, justificacion, mejora }.
 ${STRICT_APPLICA ? 'POLÍTICA ESTRICTA: Asume aplica=false salvo evidencia textual explícita.' : ''}
 `.trim();
 
+      let analysisPrompt = '';
       if (metodologia === 'cobranza') {
         if (cartera === 'carteras_bogota') {
           analysisPrompt =
@@ -260,13 +294,18 @@ ${STRICT_APPLICA ? 'POLÍTICA ESTRICTA: Asume aplica=false salvo evidencia textu
             'Analiza la auditoría de la cartera Medellín considerando formalidad, perfilamiento, alternativas de pago y manejo de objeciones.';
         }
       }
-      analysisPrompt = [analysisPrompt, reglasAplicabilidad].filter(Boolean).join('\n\n');
+      analysisPrompt = [analysisPrompt, reglasAplicabilidad,
+        (scriptText
+          ? `GUION/CAMPAÑA (resumen del PDF, úsalo como referencia y no inventes):\n${scriptText.slice(0, 1500)}${scriptText.length > 1500 ? '\n[...truncado...]' : ''}`
+          : '')
+      ].filter(Boolean).join('\n\n');
+
       if (ONLY_CRITICAL) {
         analysisPrompt += '\nREGLA: Reporta solo ERRORES CRÍTICOS y ALERTAS ANTIFRAUDE.';
       }
 
       // --- 4) Análisis LLM
-      const analysis = await analyzeTranscriptWithMatrix({
+      let analysis = await analyzeTranscriptWithMatrix({
         transcript,
         matrix,
         prompt: analysisPrompt,
@@ -283,8 +322,7 @@ ${STRICT_APPLICA ? 'POLÍTICA ESTRICTA: Asume aplica=false salvo evidencia textu
         alternatives:hasAlternativesEvidence(transcriptText),
         beneCons:    hasBenefitsConsequences(transcriptText),
         consent:     hasConsentEvidence(transcriptText),
-        fullScript:  hasFullScriptFlow(transcriptText),
-        reminder:    hasReminderEvidence(transcriptText) // NUEVO
+        fullScript:  hasFullScriptFlow(transcriptText)
       };
 
       // Construimos lista de atributos NO APLICAN por reglas duras
@@ -305,64 +343,28 @@ ${STRICT_APPLICA ? 'POLÍTICA ESTRICTA: Asume aplica=false salvo evidencia textu
         if (aGui && !evidence.fullScript)  forceNA.add(attr);
       });
 
-      // Regla auxiliar A: si NO hay negociación y SÍ hay continuidad por WhatsApp → NA en negociación/objeciones/consentimiento
-      if (!evidence.negotiation && evidence.whatsapp) {
-        matrix.forEach(row => {
-          const name = String(row.atributo || row.Atributo || '').trim();
-          const n = name.toLowerCase();
-          if (/confirmaci[oó]n de la negociaci[oó]n/.test(n) || /objeciones/.test(n) || /autorizaci[oó]n .*contact(ar|arse)/.test(n)) {
-            forceNA.add(name);
-          }
-        });
-      }
-
-      // *** Regla auxiliar B (NUEVA): llamada de RECORDATORIO ***
-      // Si es recordatorio y no hay negociación cerrada ni consentimiento explícito,
-      // los ítems (2) Confirmación negociación y (4) Autorización otros medios => NA
-      if (evidence.reminder) {
-        matrix.forEach(row => {
-          const name = String(row.atributo || row.Atributo || '').trim();
-          const n = name.toLowerCase();
-          const isConfirm = /confirmaci[oó]n de la negociaci[oó]n/.test(n);
-          const isConsent = /autorizaci[oó]n .*contact(ar|arse)/.test(n);
-          if (isConfirm && !evidence.negotiation) forceNA.add(name);
-          if (isConsent && !evidence.consent)     forceNA.add(name);
-        });
-      }
-
-      // === Propagar NA también a analysis.atributos y porAtributo ===
-      const forceNaNames = new Set(Array.from(forceNA.values()).map(n => n.toLowerCase()));
-      const toNaObj = (it, msg) => ({
-        ...it,
-        aplica: false,
-        status: 'NA',
-        ...(typeof it?.cumplido === 'boolean' ? {} : { cumplido: null }),
-        justificacion: it?.justificacion || (msg || 'No Aplica por evidencia determinista (no se cumplen condiciones de activación).')
-      });
-
-      // 4.b.1) sobre analysis.atributos
-      if (Array.isArray(analysis?.atributos)) {
-        analysis.atributos = analysis.atributos.map(it => {
-          const name = String(it?.atributo || '').toLowerCase();
-          if (forceNaNames.has(name)) return toNaObj(it);
-          return it;
-        });
-      }
-
-      // 4.b.2) STRICT_APPLICA: cualquier atributo SIN aplica=true explícito pasa a NA
-      if (STRICT_APPLICA && Array.isArray(analysis?.atributos)) {
-        analysis.atributos = analysis.atributos.map(it => {
-          if (it?.aplica === true) return it;
-          return toNaObj(it, 'No Aplica (política estricta: sin evidencia textual clara).');
-        });
-      }
-
-      // 4.b.3) mantener también la versión porAtributo
+      // Aplico NA sobre porAtributo del LLM
       if (Array.isArray(analysis?.porAtributo)) {
         analysis.porAtributo = analysis.porAtributo.map(it => {
-          const name = String(it?.atributo || '').toLowerCase();
-          if (forceNaNames.has(name)) return toNaObj(it);
-          if (STRICT_APPLICA && it?.aplica !== true) return toNaObj(it, 'No Aplica (política estricta: sin evidencia textual clara).');
+          const name = s(it?.atributo);
+          if (forceNA.has(name)) {
+            return {
+              ...it,
+              aplica: false,
+              status: 'NA',
+              cumplido: it?.cumplido ?? null,
+              justificacion: it?.justificacion || 'No Aplica por evidencia determinista (no se cumplen condiciones de activación).'
+            };
+          }
+          if (STRICT_APPLICA && it?.aplica !== true) {
+            return {
+              ...it,
+              aplica: false,
+              status: 'NA',
+              cumplido: it?.cumplido ?? null,
+              justificacion: it?.justificacion || 'No Aplica (política estricta: sin evidencia textual clara).'
+            };
+          }
           return it;
         });
       }
@@ -390,7 +392,6 @@ ${STRICT_APPLICA ? 'POLÍTICA ESTRICTA: Asume aplica=false salvo evidencia textu
       if (evidence.whatsapp && !evidence.negotiation) autoHall.push('Se dejó continuidad por WhatsApp sin concretar negociación.');
       if (evidence.consent)        autoHall.push('Se solicitó autorización para futuros contactos por otros medios.');
       if (evidence.fullScript)     autoHall.push('Se siguió el guion completo de la campaña.');
-      if (evidence.reminder)       autoHall.push('Llamada de recordatorio (no orientada a negociar en el mismo contacto).');
 
       const hallSet = new Set(llmHall.map(s));
       autoHall.forEach(h => { if (!hallSet.has(s(h))) hallSet.add(h); });
@@ -502,8 +503,14 @@ ${STRICT_APPLICA ? 'POLÍTICA ESTRICTA: Asume aplica=false salvo evidencia textu
 
       const savedPath = saveAudit(audit);
 
-      // --- 9) Respuesta
-      return res.json({ ...audit, savedPath });
+      // --- 9) Respuesta (con DIAGNÓSTICO)
+      const debug = {
+        matrix: debugMatrix, // columnas (incluye "Criterio" si existe), primeras 3 filas y totalRows
+        script: scriptDiag   // si se adjunta PDF, muestra bytes, chars y preview
+      };
+      if (DEBUG_PROMPT) debug.promptEcho = analysisPrompt;
+
+      return res.json({ ...audit, savedPath, debug });
     } catch (err) {
       console.error('[ANALYZE][ERROR]', err);
       return res.status(500).json({

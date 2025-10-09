@@ -1,5 +1,16 @@
 // src/services/analysisService.js
 import OpenAI from 'openai';
+import fs from 'fs';
+import path from 'path';
+import { createRequire } from 'node:module';
+const require = createRequire(import.meta.url);
+
+// CommonJS interop seguro en ESM:
+const pdfParse = require('pdf-parse');
+const mammoth  = require('mammoth');
+
+// opcional: atajos a promesas
+const { promises: fsp } = fs;
 
 /** Intenta parsear JSON incluso si el modelo añadió texto alrededor */
 function forceJson(text) {
@@ -63,7 +74,6 @@ function isCriticalRow(row) {
 
   if (byWeightEnabled && Number.isFinite(peso) && peso >= thr) return true;
 
-  // Si no calza, por defecto NO crítico (la ruta ya filtra, aquí es solo compat)
   return false;
 }
 /* ============================================================= */
@@ -110,17 +120,224 @@ function hash32(s) {
   return (h >>> 0).toString(16);
 }
 
-export async function analyzeTranscriptWithMatrix({ transcript, matrix, prompt = '', context = {} }) {
+/* ==================== UTIL: extracción de guion (PDF/DOCX/TEXTO) ==================== */
+/** Limpia HTML simple y comprime espacios */
+function stripHtmlAndNormalize(s = '') {
+  return String(s)
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\u00a0/g, ' ')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\s*\n\s*/g, '\n')
+    .trim();
+}
+
+/** Extrae texto de un Buffer PDF (robusto) */
+async function extractTextFromPdfBuffer(buf) {
+  try {
+    const res = await pdfParse(buf);
+    return stripHtmlAndNormalize(res.text || '');
+  } catch (e) {
+    console.warn('[analysisService] Error pdf-parse:', e?.message || e);
+    return '';
+  }
+}
+
+/** Extrae texto de un Buffer DOCX (robusto) */
+async function extractTextFromDocxBuffer(buf) {
+  try {
+    const res = await mammoth.extractRawText({ buffer: buf });
+    return stripHtmlAndNormalize(res.value || '');
+  } catch (e) {
+    console.warn('[analysisService] Error mammoth:', e?.message || e);
+    return '';
+  }
+}
+
+/**
+ * Carga el guion desde:
+ * - promptPath (ruta a .pdf o .docx),
+ * - prompt en base64 (data:application/pdf;base64,... o JVBERi0...),
+ * - o prompt ya como texto plano.
+ */
+async function loadCampaignText({ prompt = '', promptPath = '' } = {}) {
+  const MAX = Number(process.env.CAMPAIGN_SCRIPT_MAX_CHARS || 5000);
+
+  // 1) Ruta a archivo
+  if (promptPath) {
+    try {
+      const ext = path.extname(promptPath).toLowerCase();
+      const buf = await fsp.readFile(promptPath);
+      let text = '';
+      if (ext === '.pdf')       text = await extractTextFromPdfBuffer(buf);
+      else if (ext === '.docx') text = await extractTextFromDocxBuffer(buf);
+      else                      text = stripHtmlAndNormalize(buf.toString('utf8'));
+      return text.slice(0, MAX);
+    } catch (e) {
+      console.warn('[analysisService] No se pudo leer promptPath:', e?.message || e);
+      return '';
+    }
+  }
+
+  // 2) Base64 data URL de PDF
+  const trimmed = String(prompt || '').trim();
+  const b64Match = trimmed.match(/^data:application\/pdf;base64,([A-Za-z0-9+/=]+)$/);
+  if (b64Match) {
+    const buf = Buffer.from(b64Match[1], 'base64');
+    const text = await extractTextFromPdfBuffer(buf);
+    return text.slice(0, MAX);
+  }
+  // 2b) Base64 puro que comienza con JVBERi0 (=%PDF-1.)
+  if (/^JVBERi0/.test(trimmed)) {
+    try {
+      const buf = Buffer.from(trimmed, 'base64');
+      const text = await extractTextFromPdfBuffer(buf);
+      return text.slice(0, MAX);
+    } catch {
+      return '';
+    }
+  }
+
+  // 3) Si vino el BINARIO como string con %PDF-1.x -> ignorar para no contaminar prompt
+  if (/%PDF-1\./.test(trimmed)) {
+    return '';
+  }
+
+  // 4) Texto plano
+  return stripHtmlAndNormalize(trimmed).slice(0, MAX);
+}
+
+/* ==================== NO-OPS para compatibilidad (sin debug en consola) ==================== */
+const PREVIEW_CHARS = Number(process.env.DEBUG_PROMPT_PREVIEW_CHARS || 800);
+function serializeMessages(messages = []) {
+  return messages.map((m, i) => {
+    const role = m?.role || `msg${i}`;
+    const content = Array.isArray(m?.content)
+      ? m.content.map(c => (typeof c === 'string' ? c : c?.text || '')).join('\n')
+      : (m?.content || '');
+    return `--- ${role.toUpperCase()} ---\n${content}`;
+  }).join('\n\n');
+}
+function extractByRole(messages = [], role = 'system') {
+  const blocks = messages
+    .filter(m => m.role === role)
+    .map(m => Array.isArray(m.content)
+      ? m.content.map(c => (typeof c === 'string' ? c : (c?.text || ''))).join('\n')
+      : (m.content || '')
+    );
+  return blocks.join('\n\n');
+}
+function dumpPrompt() { /* no-op: sin logs */ }
+/* ====================================================================== */
+
+/* ==================== Reglas locales NA/forzados (solo transcripción) ==================== */
+function naRulesFromTranscript(atributoNombre = '', transcript = '') {
+  const name = (atributoNombre || '').toLowerCase();
+  const t = (transcript || '').toLowerCase();
+
+  const hasMonto = /\$\s?\d[\d\.\,]*|\b\d{3}\.?\d{3}\b/.test(t);
+  const hasFecha = /(hoy|mañana|\b\d{1,2}\s*(de)?\s*(ene|feb|mar|abr|may|jun|jul|ago|sep|sept|oct|nov|dic|enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre)\b|\d{4}-\d{2}-\d{2})/.test(t);
+
+  // Canal de PAGO real (no contacto). Permitimos "link de pago por WhatsApp" explícito.
+  const baseCanalPago = /(pse|link\s*de\s*pago|portal|oficina(s)?|corresponsal(es)?|sucursal|banco|dataf[oó]no|efecty|baloto)/.test(t);
+  const canalPorWhatsApp = /(link\s*de\s*pago.*whatsapp|enviar(é|e)?\s+el\s+link.*whatsapp)/.test(t);
+  const hasCanal = baseCanalPago || canalPorWhatsApp;
+
+  const pospone = /(revis(ar|o)|le escribo|env[ií]o un mensaje|mañana|quedo pendiente)/.test(t);
+
+  const intencionPago = /(pagar|pago|cuota|le escribo para coordinar|me confirma el link)/.test(t);
+  const objecion = /(no puedo pagar|no reconozco|no estoy de acuerdo|no tengo dinero|no conf[ií]o)/.test(t);
+
+  const guionGrabacion = /(grabada|grabaci[oó]n).+ley\s*1581/.test(t) || /ley\s*1581.+(grabada|grabaci[oó]n)/.test(t);
+  const guionEmpresariales = /recaud.*cuentas.*empresariales|cuentas.*empresariales/.test(t);
+  const guionDespedida = /(gracias|hasta luego|que est[eé] muy bien|feliz d[ií]a)/.test(t);
+  const guionOK = guionGrabacion && guionEmpresariales && guionDespedida;
+
+  const whatsappOK = /(este mismo n[uú]mero.*whatsapp|tiene whatsapp|le voy a enviar un mensaje|le escribo por whatsapp)/.test(t);
+
+  // A) Confirmación de negociación → NA si no hay cierre (monto+fecha+canal) y hay posposición
+  if (/confirmaci[oó]n.*negociaci[oó]n/.test(name)) {
+    const cierre = hasMonto && hasFecha && hasCanal;
+    if (!cierre && pospone) return { aplica: false, forceCumple: true, reason_code: 'NA_NO_CIERRE' };
+  }
+
+  // B) Debate de objeciones → NA si no hay objeción (sí hay intención de pago)
+  if (/objeciones?/.test(name)) {
+    if (intencionPago && !objecion) return { aplica: false, forceCumple: true, reason_code: 'NA_SIN_OBJECION' };
+  }
+
+  // C) Guion completo → Cumple si se detectan 3 piezas (fallback por transcripción)
+  if (/guion.*completo/.test(name)) {
+    if (guionOK) return { aplica: true, forceCumple: true, reason_code: 'OK_GUION_3P' };
+  }
+
+  // D) Autorización de contacto → Cumple si WhatsApp al mismo número (aceptación)
+  if (/autorizaci[oó]n.*contactar/.test(name) || /contactarlo por diferentes medios/.test(name)) {
+    if (whatsappOK) return { aplica: true, forceCumple: true, reason_code: 'OK_CONTACTO_WHATSAPP' };
+  }
+
+  return null;
+}
+
+/* ==================== Fallback de Hallazgos ==================== */
+/** Extrae hechos rápidos de la transcripción para construir hallazgos si el LLM no los trae */
+function extractQuickFacts(t = '') {
+  const txt = String(t || '').toLowerCase();
+  const amounts = Array.from(txt.matchAll(/\b\d{1,3}(?:\.\d{3})+(?:,\d+)?\b|\$\s?\d[\d\.\,]*/g)).map(m => m[0]).slice(0, 5);
+  const dates   = Array.from(txt.matchAll(/\b(hoy|mañana|\d{1,2}\s*(de)?\s*(ene|feb|mar|abr|may|jun|jul|ago|sep|sept|oct|nov|dic|enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre)|\d{4}-\d{2}-\d{2})\b/g)).map(m => m[0]).slice(0, 5);
+
+  const hasGrabacionLey = /(grabada|grabaci[oó]n).+ley\s*1581|ley\s*1581.+(grabada|grabaci[oó]n)/.test(txt);
+  const hasEmpresariales = /recaud.*cuentas.*empresariales|cuentas.*empresariales/.test(txt);
+  const hasWhatsApp = /whatsapp/.test(txt);
+
+  return { amounts, dates, hasGrabacionLey, hasEmpresariales, hasWhatsApp };
+}
+
+/** Construye hallazgos si el LLM no mandó ninguno */
+function buildHallazgos(transcriptText = '', atributos = [], guionCheck = {}) {
+  const h = [];
+  const f = extractQuickFacts(transcriptText);
+  if (guionCheck?.porcentaje_cobertura >= 1 || (f.hasGrabacionLey && f.hasEmpresariales)) {
+    h.push('Se informó grabación y Ley 1581, y se aclaró recaudo a cuentas empresariales.');
+  }
+  const alt = atributos?.find(a => /alternativas|escalonado/i.test(a?.categoria || a?.atributo || '')) || atributos?.find(a => /alternativas/i.test(a?.atributo || ''));
+  if (alt) {
+    const montoEj = f.amounts[0] ? ` (p. ej., ${f.amounts[0]})` : '';
+    h.push(`Se ofrecieron alternativas de pago${montoEj}${f.dates[0] ? ` con referencia temporal (${f.dates[0]})` : ''}.`);
+  }
+  const nego = atributos?.find(a => /confirmaci[oó]n.*negociaci[oó]n/i.test(a?.atributo || ''));
+  if (nego && nego.aplica === false) {
+    h.push('No hubo cierre de negociación en la llamada (NA por no existir monto+fecha+canal acordados).');
+  }
+  const aut = atributos?.find(a => /autorizaci[oó]n.*contact/i.test(a?.atributo || '') || /contactarlo por diferentes medios/i.test(a?.atributo || ''));
+  if (aut && (aut.cumplido || f.hasWhatsApp)) {
+    h.push('Se habilitó contacto posterior por WhatsApp en el mismo número.');
+  }
+  if (!h.length) {
+    h.push('Se brindó información sobre la obligación y se exploraron opciones de pago.');
+  }
+  return h.slice(0, 4);
+}
+
+/* ==================== Export principal ==================== */
+export async function analyzeTranscriptWithMatrix({
+  transcript,
+  matrix,
+  prompt = '',
+  promptPath = '',       // <<--- permite pasar ruta a PDF/DOCX
+  context = {}
+}) {
   const client = new OpenAI({
     apiKey: process.env.OPENAI_API_KEY,
-    timeout: Number(process.env.OPENAI_TIMEOUT_MS || 180_000),
+    timeout: Number(process.env.OPENAI_TIMEOUT_MS),
   });
-  const model        = process.env.OPENAI_CHAT_MODEL || 'gpt-4o-mini';
-  const MAX_CHARS    = Number(process.env.ANALYSIS_MAX_INPUT_CHARS || 20_000);
-  const MAX_TOKENS   = Number(process.env.ANALYSIS_MAX_TOKENS || 1_000);
-  const BATCH_SIZE   = Number(process.env.ANALYSIS_BATCH_SIZE || 20);
-  const BATCH_TOKENS = Number(process.env.ANALYSIS_BATCH_TOKENS || 700);
 
+  const model        = process.env.OPENAI_CHAT_MODEL;
+  const MAX_CHARS    = Number(process.env.ANALYSIS_MAX_INPUT_CHARS);
+  const MAX_TOKENS   = Number(process.env.ANALYSIS_MAX_TOKENS);
+  const BATCH_SIZE   = Number(process.env.ANALYSIS_BATCH_SIZE);
+  const BATCH_TOKENS = Number(process.env.ANALYSIS_BATCH_TOKENS);
+
+  // '0' => false
   const ONLY_CRITICAL = String(process.env.ANALYZE_ONLY_CRITICAL || '0') !== '0';
 
   // ---------- Helpers ----------
@@ -138,35 +355,30 @@ export async function analyzeTranscriptWithMatrix({ transcript, matrix, prompt =
   const maybeTruncate = (s, max) => {
     const txt = String(s || '');
     if (!max || txt.length <= max) return txt;
-    console.warn(`[analysisService] Transcripción truncada a ${max} chars (original=${txt.length}).`);
     return txt.slice(0, max);
   };
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-  // --- Info para debug de guion ---
-  const hadScript = /\bGuion de la campaña\b/i.test(prompt || '') || /guion/i.test(prompt || '');
-  const scriptPreview = (prompt || '').slice(0, 300);
-  const promptHash = hash32(prompt || '');
+  // --- Cargar texto REAL del guion/reglas ---
+  const campaignText = await loadCampaignText({ prompt, promptPath });
+
+  // --- Info para guion (basado en texto, no binario) ---
+  const hadScript = /guion/i.test(campaignText || '');
+  let scriptPreview = (campaignText || '').slice(0, 300);
+  let promptHash = hash32(campaignText || '');
 
   // --- Rubrica de OBJECIONES (operativa) ---
   const OBJECCIONES_RULES = `
 Reglas para "Debate objeciones en función de la situación del cliente":
 - CUMPLE si el agente (a) identifica la situación concreta del cliente y (b) propone al menos una alternativa coherente con esa situación.
-- NO APLICA (tratar como CUMPLE) cuando el cliente acepta de inmediato la propuesta sin presentar objeciones.
-- Ejemplos:
-  • Salud / Desempleo / Disminución de ingresos → plan de pagos, fecha de promesa, escalonado, validación de capacidad.
-  • "Ya pagué" → solicitar soporte/comprobante y validar canal oficial.
-  • "No confío" → dirigir a canal oficial (link de pago / PSE / portal / oficinas autorizadas).
-  • "No tengo dinero hoy" → fecha compromiso, monto parcial, plan en cuotas.
-  • "No puedo ahora" → reprogramar contacto y confirmar mejor horario/canal.
+- NO APLICA (tratar como CUMPLE) cuando el cliente acepta de inmediato la propuesta o muestra intención de pago sin cuestionar.
 `.trim();
 
   // --- Policy block SOLO críticos/antifraude ---
   const CRITICAL_POLICY = ONLY_CRITICAL ? `
 REGLAS DE SEVERIDAD Y ALCANCE (OBLIGATORIAS):
-- IGNORA por completo cualquier afectación, recomendación o desviación que NO sea CRÍTICA ni ANTIFRAUDE.
-- Evalúa ÚNICAMENTE los atributos recibidos (lista cerrada) y trátalos como CRÍTICOS: si no hay evidencia explícita de cumplimiento => "cumplido": false.
-- Reporta alertas de FRAUDE cuando aplique; incluye una cita breve en cada alerta.
+- Evalúa ÚNICAMENTE los atributos recibidos (lista cerrada). Si no hay evidencia clara => "cumplido": false.
+- Reporta alertas de FRAUDE si hay canales/contacts no oficiales.
 `.trim() : '';
 
   const makeReq = (userContent, maxTokens = MAX_TOKENS, extraSystem = []) => ({
@@ -183,18 +395,19 @@ REGLAS DE SEVERIDAD Y ALCANCE (OBLIGATORIAS):
         'Cada "justificacion" debe citar o parafrasear una frase breve del audio cuando marques "cumplido": false.',
         'No inventes datos fuera de la transcripción.',
         `Canales oficiales de pago: ${OFFICIAL_PAY_CHANNELS.join(', ')}.`,
-        'Marca alerta de FRAUDE si el agente pide consignar/transferir a un canal NO oficial o proporciona contacto no oficial (otro número/WhatsApp personal).',
-        'Incluye SIEMPRE una cita textual corta en cada alerta.',
-        'Si recibes "Guion de la campaña", identifica hasta 8 frases claves (o las [OBLIGATORIO]) y verifica presencia (fuzzy). Devuelve "guion_check" con cobertura y faltantes.',
+        'Marca FRAUDE si el agente deriva a un canal/contacto NO oficial.',
+        'Si recibes "Guion de la campaña", devuelve "guion_check" con cobertura y faltantes.',
         OBJECCIONES_RULES,
-        CRITICAL_POLICY
+        CRITICAL_POLICY,
+        // Regla clave de NA:
+        'Si el atributo NO APLICA por el propio criterio (p. ej., no hubo negociación que cerrar; no hubo objeción; aviso ya dado por IVR/contrato), marca "aplica": false y de todos modos "cumplido": true y "deduccion": 0, explicando la razón en "justificacion".'
       ].filter(Boolean).join(' ') },
-      ...(context?.metodologia || context?.cartera || prompt || (extraSystem && extraSystem.length) ? [{
+      ...(context?.metodologia || context?.cartera || campaignText || (extraSystem && extraSystem.length) ? [{
         role: 'system',
         content: [
           context?.metodologia ? `Metodología: ${context.metodologia}.` : '',
           context?.cartera     ? `Cartera: ${context.cartera}.`         : '',
-          prompt ? `Reglas/Guion de campaña:\n${prompt}` : '',
+          campaignText ? `Reglas/Guion de campaña:\n${campaignText}` : '',
           ...(extraSystem || [])
         ].filter(Boolean).join('\n')
       }] : []),
@@ -216,7 +429,7 @@ REGLAS DE SEVERIDAD Y ALCANCE (OBLIGATORIAS):
   const baseUser = `
 Vas a AUDITAR una transcripción contra una MATRIZ DE CALIDAD. El campo "criterio" de cada atributo es la fuente principal de verdad.
 
-MATRIZ (atributo | categoría | peso | criterio opcional):
+MATRIZ (atributo | categoría | peso | criterio ):
 ${matrixAsText}
 
 ATRIBUTOS ESPERADOS (${expectedCount}):
@@ -229,54 +442,44 @@ Devuelve JSON ESTRICTAMENTE con el siguiente esquema (sin comentarios):
 {
   "agent_name": "string",
   "client_name": "string",
-  "resumen": "string (100-200 palabras, sin nombres inventados)",
-  "hallazgos": ["string", "string", "string"],
+  "resumen": "string",
+  "hallazgos": ["string"],
   "atributos": [
     {
       "atributo": "string",
       "categoria": "string",
       "cumplido": true,
-      "justificacion": "string (si false, cita/parafrasea evidencia concreta)",
+      "aplica": true,
+      "deduccion": 0,
+      "justificacion": "string",
       "mejora": "string",
       "reconocimiento": "string"
     }
   ],
-  "sugerencias_generales": ["string", "string", "string"],
-  "fraude": {
-    "alertas": [
-      { "tipo": "cuenta_no_oficial|contacto_numero_no_oficial|otro", "cita": "frase corta", "riesgo": "alto|medio|bajo" }
-    ],
-    "observaciones": "string"
-  },
-  "guion_check": {
-    "frases_detectadas": ["string"],
-    "obligatorias_faltantes": ["string"],
-    "porcentaje_cobertura": 0
-  }
+  "sugerencias_generales": ["string"],
+  "fraude": { "alertas": [{ "tipo": "cuenta_no_oficial|contacto_numero_no_oficial|otro", "cita": "string", "riesgo": "alto|medio|bajo" }], "observaciones": "string" },
+  "guion_check": { "frases_detectadas": ["string"], "obligatorias_faltantes": ["string"], "porcentaje_cobertura": 0 }
 }
-
-REGLAS (OBLIGATORIAS):
-- LISTA CERRADA: Evalúa ÚNICAMENTE los atributos listados arriba. No inventes atributos ni cambies los nombres.
-- ORDEN: Mantén el MISMO orden que en "ATRIBUTOS ESPERADOS".
-- EVIDENCIA: Si marcas "cumplido": false, incluye una cita o parafraseo breve del fragmento específico.
-- TRATAMIENTO DE CRÍTICOS: Los atributos recibidos se consideran CRÍTICOS; si no hay evidencia clara de cumplimiento → "cumplido": false (fail-closed).
-- Si existen frases [OBLIGATORIO] en el guion, trátalas como indispensables en "guion_check".
-- No incluyas texto fuera del JSON.
-- Si no hay evidencia clara de nombres, deja "agent_name" y/o "client_name" como "".
 `.trim();
 
   // ---------- 1) Intentos normales (hasta 3) ----------
   let lastErr;
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
-      const completion = await client.chat.completions.create(makeReq(baseUser));
+      const req = makeReq(baseUser);
+
+      const completion = await client.chat.completions.create(req);
       const raw  = completion.choices?.[0]?.message?.content || '';
       const json = forceJson(raw);
       if (!json || !Array.isArray(json.atributos)) {
         throw new Error('El modelo no devolvió JSON válido con "atributos".');
       }
-      const ret = finalizeFromLLM(json, matrix, transcriptText, { onlyCritical: ONLY_CRITICAL });
-      ret._debug_prompt = { had_script: hadScript, prompt_hash: promptHash, script_preview: scriptPreview };
+      const ret = finalizeFromLLM(json, matrix, transcriptText, { onlyCritical: ONLY_CRITICAL, campaignText });
+      ret._debug_prompt = {
+        had_script: hadScript,
+        prompt_hash: hash32(serializeMessages(req.messages)),
+        prompt_preview: serializeMessages(req.messages).slice(0, PREVIEW_CHARS)
+      };
       return ret;
     } catch (err) {
       lastErr = err;
@@ -288,8 +491,7 @@ REGLAS (OBLIGATORIAS):
         err?.status === 408 || err?.status === 504 || err?.status === 524;
 
       if (isTimeoutish && attempt < 3) {
-        const backoff = 800 * attempt ** 2; // 0.8s, 3.2s
-        console.warn(`[analysisService] Timeout. Retry ${attempt}/3 en ${backoff}ms...`);
+        const backoff = 800 * attempt ** 2;
         await sleep(backoff);
         continue;
       }
@@ -299,11 +501,11 @@ REGLAS (OBLIGATORIAS):
 
   // ---------- 2) Intento final con truncado agresivo ----------
   try {
-    const hardMax = Math.floor((MAX_CHARS || 20_000) / 2);
+    const hardMax = Math.floor((Number(process.env.ANALYSIS_MAX_INPUT_CHARS) || 20000) / 2);
     const smallTranscript = maybeTruncate(toPlainTranscript(transcript), hardMax);
 
     const userTruncated = `
-MATRIZ (atributo | categoría | peso | criterio opcional):
+MATRIZ (atributo | categoría | peso | criterio ):
 ${matrixAsText}
 
 ATRIBUTOS ESPERADOS (${expectedCount}):
@@ -315,14 +517,17 @@ ${smallTranscript}
 Devuelve el MISMO JSON solicitado antes (con TODOS los atributos y en el mismo orden).
 `.trim();
 
-    const completion = await client.chat.completions.create(
-      makeReq(userTruncated, Math.min(MAX_TOKENS, 800))
-    );
+    const req2 = makeReq(userTruncated, Math.min(Number(process.env.ANALYSIS_MAX_TOKENS) || 1000, 800));
+    const completion = await client.chat.completions.create(req2);
     const raw  = completion.choices?.[0]?.message?.content || '';
     const json = forceJson(raw);
     if (json && Array.isArray(json.atributos)) {
-      const ret = finalizeFromLLM(json, matrix, smallTranscript, { onlyCritical: ONLY_CRITICAL });
-      ret._debug_prompt = { had_script: hadScript, prompt_hash: promptHash, script_preview: scriptPreview };
+      const ret = finalizeFromLLM(json, matrix, smallTranscript, { onlyCritical: ONLY_CRITICAL, campaignText });
+      ret._debug_prompt = {
+        had_script: hadScript,
+        prompt_hash: hash32(serializeMessages(req2.messages)),
+        prompt_preview: serializeMessages(req2.messages).slice(0, PREVIEW_CHARS)
+      };
       return ret;
     }
     throw new Error('El modelo no devolvió JSON válido con "atributos" (modo truncado).');
@@ -331,40 +536,21 @@ Devuelve el MISMO JSON solicitado antes (con TODOS los atributos y en el mismo o
   }
 
   // ---------- 3) PLAN B por lotes ----------
-  try {
-    const result = await analyzeByBatches({
-      client, model, transcriptText, matrix, BATCH_SIZE, BATCH_TOKENS
-    });
-    result._debug_prompt = { had_script: hadScript, prompt_hash: promptHash, script_preview: scriptPreview };
-    return result;
-  } catch (err3) {
-    console.error('[analysisService][PLAN B][ERROR]', err3);
-    // Último fallback: estructura válida para no romper el frontend
-    const full = (matrix || []).map(row => ({
-      atributo: String(row?.atributo ?? row?.Atributo ?? '').trim(),
-      categoria: String(row?.categoria ?? row?.Categoria ?? ''),
-      peso: Number(row?.peso ?? row?.Peso ?? 0),
-      critico: true, // la matriz ya viene filtrada a críticos
-      cumplido: false,
-      justificacion: 'No se encontró evidencia explícita de cumplimiento (fail-closed por criticidad).',
-      mejora: null,
-      reconocimiento: null
-    }));
-    return {
-      agent_name: '',
-      client_name: '',
-      resumen: '',
-      hallazgos: [],
-      atributos: full,
-      sugerencias_generales: [],
-      fraude: { alertas: detectFraudHeuristics(String(transcript || '')), observaciones: '' },
-      _debug_prompt: { had_script: hadScript, prompt_hash: promptHash, script_preview: scriptPreview }
-    };
-  }
+  const result = await analyzeByBatches({
+    transcriptText, matrix,
+    client, model,
+    BATCH_SIZE, BATCH_TOKENS
+  });
+  result._debug_prompt = {
+    had_script: hadScript,
+    prompt_hash: hash32('plan_b_batches_' + (matrix?.length || 0)),
+    prompt_preview: 'Plan B por lotes.'
+  };
+  return result;
 }
 
-/** Une lo que devuelve el LLM con la matriz, garantizando TODOS los atributos en orden */
-function finalizeFromLLM(json, matrix, transcriptText = '', { onlyCritical = false } = {}) {
+/** Une lo que devuelve el LLM con la matriz, garantizando TODOS los atributos en orden + reglas NA locales */
+function finalizeFromLLM(json, matrix, transcriptText = '', { onlyCritical = false, campaignText = '' } = {}) {
   const byName = new Map();
   for (const a of (json.atributos || [])) {
     const k = keyName(a?.atributo);
@@ -383,55 +569,73 @@ function finalizeFromLLM(json, matrix, transcriptText = '', { onlyCritical = fal
     const nombre = String(row?.atributo ?? row?.Atributo ?? '').trim();
     if (!nombre) continue;
 
-    const found = byName.get(keyName(nombre));
+    const found = byName.get(keyName(nombre)) || {};
     const categoria = String(found?.categoria ?? (row?.categoria ?? row?.Categoria ?? '')).trim();
     const peso = Number(row?.peso ?? row?.Peso ?? 0);
-
-    // En este punto, la matriz ya está filtrada a críticos/antifraude.
     const critico = true;
 
-    // Default: críticos fail-closed
-    let cumplido;
-    if (typeof found?.cumplido === 'boolean') {
-      cumplido = found.cumplido;
-    } else {
-      cumplido = false;
-    }
-
+    // valores base del LLM
+    let cumplido = (typeof found?.cumplido === 'boolean') ? found.cumplido : false;
+    let aplica = (typeof found?.aplica === 'boolean') ? found.aplica : true;
     let justif = (found?.justificacion || '').trim();
+    let mejora = (found?.mejora ?? (cumplido ? null : 'Definir acciones concretas para cumplir el criterio.'));
+    let reconocimiento = found?.reconocimiento ?? null;
 
-    // Regla especial de guion
+    // Regla extra para "guion completo" basada en guion_check
     if (/usa\s+guion\s+establecido/i.test(nombre)) {
       if (guionCheck.obligatorias_faltantes.length > 0) {
         cumplido = false;
         if (!justif) {
           justif = `Faltan frases obligatorias de guion: ${guionCheck.obligatorias_faltantes.slice(0,3).join('; ')}.`;
         }
-      } else {
+      } else if (guionCheck.porcentaje_cobertura > 0 || guionCheck.frases_detectadas.length > 0) {
         cumplido = true;
+        aplica = true;
         if (!justif) justif = 'Se cubren las frases obligatorias del guion.';
       }
     }
 
-    const defaultJustif = cumplido
-      ? 'Se evidencia cumplimiento del criterio.'
-      : 'No se encontró evidencia explícita de cumplimiento (fail-closed por criticidad).';
+    // === Reglas locales NA/forzados (sin CRM) ===
+    const override = naRulesFromTranscript(nombre, transcriptText);
+    if (override) {
+      if (override.aplica === false) {
+        aplica = false;
+        cumplido = true;                  // NA → cuenta como Cumple
+        mejora = null;
+        if (!justif) {
+          justif = (override.reason_code === 'NA_NO_CIERRE')
+            ? 'No aplica: no hubo cierre de negociación; la persona pospone y no hay monto+fecha+canal acordados.'
+            : (override.reason_code === 'NA_SIN_OBJECION')
+              ? 'No aplica: no se presentaron objeciones; el cliente expresa intención de pago/ coordinación.'
+              : 'No aplica según el criterio (NA).';
+        }
+      }
+      if (override.forceCumple) {
+        cumplido = true;
+        aplica = (override.aplica === false) ? false : true;
+        mejora = null;
+        if (!justif) justif = 'Cumplimiento detectado por pauta del criterio.';
+      }
+    }
 
-    const mejora = (found?.mejora ?? (cumplido ? null : 'Definir acciones concretas para cumplir el criterio.'));
+    // deducción: si NA o Cumple → 0; si No cumple → peso
+    const deduccion = (!aplica || cumplido) ? 0 : (Number.isFinite(peso) ? peso : 0);
 
     full.push({
       atributo: nombre,
       categoria,
       peso,
       critico,
+      aplica,
       cumplido,
-      justificacion: justif || defaultJustif,
+      deduccion,
+      reason_code: override?.reason_code || null,
+      justificacion: justif || (cumplido ? 'Se evidencia cumplimiento del criterio.' : 'No se encontró evidencia explícita de cumplimiento (fail-closed por criticidad).'),
       mejora,
-      reconocimiento: found?.reconocimiento ?? null
+      reconocimiento
     });
   }
 
-  // --- Combinar FRAUDE del LLM + heurística local ---
   const llmAlerts = Array.isArray(json?.fraude?.alertas) ? json.fraude.alertas : [];
   const heurAlerts = detectFraudHeuristics(transcriptText);
   const merge = [];
@@ -446,12 +650,16 @@ function finalizeFromLLM(json, matrix, transcriptText = '', { onlyCritical = fal
     if (clean.cita && !seen.has(k)) { seen.add(k); merge.push(clean); }
   }
 
-  // Saneamos salida general (lista cerrada; no arrastramos campos extra)
+  // HALLAZGOS con fallback local si el modelo no envía ninguno
+  const hall = (Array.isArray(json.hallazgos) && json.hallazgos.length)
+    ? json.hallazgos
+    : buildHallazgos(transcriptText, full, guionCheck);
+
   return {
     agent_name: typeof json.agent_name === 'string' ? cleanName(json.agent_name) : '',
     client_name: typeof json.client_name === 'string' ? cleanName(json.client_name) : '',
     resumen: json.resumen,
-    hallazgos: Array.isArray(json.hallazgos) ? json.hallazgos : [],
+    hallazgos: hall,
     atributos: full,
     sugerencias_generales: Array.isArray(json.sugerencias_generales) ? json.sugerencias_generales : [],
     fraude: {
@@ -484,7 +692,9 @@ Evalúa SOLO los siguientes atributos (en el MISMO orden) y devuelve ÚNICAMENTE
       "atributo": "string (copiar exactamente de la lista)",
       "categoria": "string",
       "cumplido": true,
-      "justificacion": "string (si marcas false, cita/parafrasea evidencia concreta)",
+      "aplica": true,
+      "deduccion": 0,
+      "justificacion": "string",
       "mejora": "string",
       "reconocimiento": "string"
     }
@@ -498,7 +708,7 @@ TRANSCRIPCIÓN (puede estar truncada):
 ${transcriptText}
 `.trim();
 
-    const completion = await client.chat.completions.create({
+    const reqB = {
       model,
       temperature: 0.2,
       max_tokens: BATCH_TOKENS,
@@ -507,7 +717,9 @@ ${transcriptText}
         { role: 'system', content: 'Responde SOLO el objeto JSON con "atributos". Si marcas false, cita evidencia concreta. Lista cerrada.' },
         { role: 'user', content: batchUser }
       ],
-    });
+    };
+
+    const completion = await client.chat.completions.create(reqB);
     const raw  = completion.choices?.[0]?.message?.content || '';
     const json = forceJson(raw);
     if (!json || !Array.isArray(json.atributos)) {
@@ -526,31 +738,31 @@ ${transcriptText}
 
   const full = (matrix || []).map(row => {
     const nombre = String(row?.atributo ?? row?.Atributo ?? '').trim();
-    const found  = byName.get(keyName(nombre));
+    const found  = byName.get(keyName(nombre)) || {};
 
     const categoria = String(found?.categoria ?? (row?.categoria ?? row?.Categoria ?? '')).trim();
     const peso = Number(row?.peso ?? row?.Peso ?? 0);
-    const critico = true; // matriz filtrada
+    const critico = true;
 
-    let cumplido;
-    if (typeof found?.cumplido === 'boolean') {
-      cumplido = found.cumplido;
-    } else {
-      cumplido = false; // fail-closed
-    }
+    let cumplido = (typeof found?.cumplido === 'boolean') ? found.cumplido : false;
+    let aplica = (typeof found?.aplica === 'boolean') ? found.aplica : true;
 
     const justif = (found?.justificacion || '').trim();
     const defaultJustif = cumplido
       ? 'Se evidencia cumplimiento del criterio.'
       : 'No se encontró evidencia explícita de cumplimiento (fail-closed por criticidad).';
     const mejora = (found?.mejora ?? (cumplido ? null : 'Definir acciones concretas para cumplir el criterio.'));
+    const deduccion = (!aplica || cumplido) ? 0 : (Number.isFinite(peso) ? peso : 0);
 
     return {
       atributo: nombre,
       categoria,
       peso,
       critico,
+      aplica,
       cumplido,
+      deduccion,
+      reason_code: null,
       justificacion: justif || defaultJustif,
       mejora,
       reconocimiento: found?.reconocimiento ?? null
@@ -576,10 +788,8 @@ TRANSCRIPCIÓN (puede estar truncada):
 ${transcriptText}
 `.trim();
 
-  let agent_name = '', client_name = '';
-  let resumen = '', hallazgos = [], sugerencias_generales = [];
   try {
-    const mini = await client.chat.completions.create({
+    const reqMini = {
       model,
       temperature: 0.2,
       max_tokens: 450,
@@ -588,23 +798,29 @@ ${transcriptText}
         { role: 'system', content: 'No incluyas nombres inventados. Responde SOLO el objeto JSON solicitado.' },
         { role: 'user', content: miniUser },
       ],
-    });
+    };
+
+    const mini = await client.chat.completions.create(reqMini);
     const rawMini  = mini.choices?.[0]?.message?.content || '';
     const jsonMini = forceJson(rawMini);
-    if (jsonMini) {
-      agent_name = typeof jsonMini.agent_name === 'string' ? cleanName(jsonMini.agent_name) : '';
-      client_name = typeof jsonMini.client_name === 'string' ? cleanName(jsonMini.client_name) : '';
-      resumen = jsonMini.resumen || '';
-      hallazgos = Array.isArray(jsonMini.hallazgos) ? jsonMini.hallazgos : [];
-      sugerencias_generales = Array.isArray(jsonMini.sugerencias_generales) ? jsonMini.sugerencias_generales : [];
-    }
-  } catch { /* si falla, devolvemos vacío sin romper */ }
-
-  // En el modo por lotes, usamos también la heurística local para fraude
-  const fraude = {
-    alertas: detectFraudHeuristics(transcriptText),
-    observaciones: ''
-  };
-
-  return { agent_name, client_name, resumen, hallazgos, atributos: full, sugerencias_generales, fraude };
+    return {
+      agent_name: typeof jsonMini?.agent_name === 'string' ? cleanName(jsonMini.agent_name) : '',
+      client_name: typeof jsonMini?.client_name === 'string' ? cleanName(jsonMini.client_name) : '',
+      resumen: jsonMini?.resumen || '',
+      hallazgos: Array.isArray(jsonMini?.hallazgos) && jsonMini.hallazgos.length ? jsonMini.hallazgos : buildHallazgos(transcriptText, full, {}),
+      sugerencias_generales: Array.isArray(jsonMini?.sugerencias_generales) ? jsonMini.sugerencias_generales : [],
+      atributos: full,
+      fraude: { alertas: detectFraudHeuristics(String(transcriptText || '')), observaciones: '' }
+    };
+  } catch {
+    return {
+      agent_name: '',
+      client_name: '',
+      resumen: '',
+      hallazgos: buildHallazgos(transcriptText, full, {}),
+      sugerencias_generales: [],
+      atributos: full,
+      fraude: { alertas: detectFraudHeuristics(String(transcriptText || '')), observaciones: '' }
+    };
+  }
 }

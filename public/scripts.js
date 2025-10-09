@@ -378,10 +378,10 @@ function renderBatchResults(result) {
         <p><b>Hallazgos:</b></p>
         <ul>${(hallazgos || []).map(h => `<li>${escapeHtml(h)}</li>`).join('') || '<li>—</li>'}</ul>
 
-        <p><b>Afectados (críticos, desde scoring):</b></p>
+        <p><b>Afectados críticos:</b></p>
         <ul>${(arr(afectadosCriticos).length ? arr(afectadosCriticos).map(a => `<li>${escapeHtml(a)}</li>`).join('') : '<li>—</li>')}</ul>
 
-        <p><b>No aplica (excluidos del cómputo):</b></p>
+        <p><b>No aplica:</b></p>
         <ul>${(arr(noAplican).length ? arr(noAplican).map(a => `<li>${escapeHtml(a)}</li>`).join('') : '<li>—</li>')}</ul>
 
         ${mejoras.length ? `
