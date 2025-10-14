@@ -16,13 +16,13 @@ import transcribeRouter from './routes/transcribe.route.js';
 import analyzeRouter    from './routes/analyze.route.js';
 import auditsRouter     from './routes/audits.route.js';
 import diagRouter       from './routes/diag.route.js';
-import batchRouter      from './routes/batch.route.js'; // export default
+import batchRouter      from './routes/batch.route.js';
 
 // --- Utilidades de ruta (ESM) ---
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = path.dirname(__filename);
 
-// --- Crear app ANTES de usarla ---
+// --- App ---
 const app = express();
 
 // --- Middlewares base ---
@@ -43,15 +43,20 @@ app.use('/', transcribeRouter);
 app.use('/', analyzeRouter);
 app.use('/', auditsRouter);
 app.use('/', diagRouter);
-app.use('/', batchRouter); // expone /batch/start y /batch/progress/:jobId
 
-// --- Arranque con fallback de puerto ---
+// ⬇️ IMPORTANTE: montamos el router de batch bajo /batch
+app.use('/batch', batchRouter);
+
+// Fallback JSON bajo /batch para rutas no encontradas
+app.use('/batch/*', (_req, res) => {
+  res.status(404).json({ error: 'Ruta /batch no encontrada' });
+});
+
+// --- Arranque ---
 function start(port, attemptsLeft = 3) {
   const server = app.listen(port, () => {
     console.log(`Servicio activo en http://127.0.0.1:${port}`);
   });
-
-  // Evita timeouts en cargas pesadas (batch)
   server.requestTimeout = 0;
   server.headersTimeout = 0;
 

@@ -14,8 +14,8 @@ setGlobalDispatcher(new Agent({
   bodyTimeout: FW_BODY_TIMEOUT_MS
 }));
 
-// Valor por defecto del .env
-const ENV_PROVIDER = (process.env.TRANSCRIBE_PROVIDER || 'faster').toLowerCase().trim();
+// Valor por defecto del .env (default del servidor)
+const ENV_PROVIDER = String(process.env.TRANSCRIBE_PROVIDER || 'openai').toLowerCase().trim();
 
 /* ================= Utilidades ================= */
 
@@ -64,25 +64,18 @@ const QUESTION_PATTERNS = [
 
 /** Pistas “duras” de rol (brutal override) */
 const AGENT_HINTS_RX = new RegExp([
-  // Presentación / empresa / área
   '\\b(le\\s+habla|habla\\s+con|mi\\s+nombre\\s+es)\\b',
   '(contacto\\s+solutions?|novarte[ck]|vartex|novartec)',
   '(área|area)\\s+(jur[ií]dica|de\\s+cobranza|juridica)',
-  // Cumplimiento / compliance
   '(llamada|conversaci[oó]n).*(grabada|monitoreada)',
   'ley\\s*1581',
-  // Gestión / alternativas
   '(alternativas?\\s+de\\s+pago|le\\s+ofrezco|le\\s+brindo|pago\\s+de\\s+contado|descuento|cuotas?)',
-  // Cierre/confirmación
   '(confirm(a|amos)|qued(a|amos)\\s+(para|entonces)|se\\s+realiza|program(a|amos))'
 ].join('|'), 'i');
 
 const CLIENT_HINTS_RX = new RegExp([
-  // Respuestas cortas / muletillas
   '^(s[ií],?\\s*(señor|señora|perfecto|de\\s+acuerdo)|bien,?\\s+gracias)\\b',
-  // Dificultades / primera persona
   '\\b(no\\s+puedo|no\\s+me\\s+alcanza|no\\s+tengo|estoy\\s+desemplead|independiente|no\\s+me\\s+queda|yo\\s+(no|pago|puedo|tengo|quisiera))\\b',
-  // Terceros ayudan
   '(mi\\s+prima|mi\\s+familia|mi\\s+espos[oa])\\b'
 ].join('|'), 'i');
 
@@ -94,21 +87,17 @@ function scoreRoleHints(text = '') {
   const t = norm(text);
   let agent = 0, client = 0;
 
-  // Presentación / cumplimiento / script típico de agente
   if (/(le\s+habla|habla\s+con|mi\s+nombre\s+es|somos|del\s+área|área\s+jur[ií]dica|departamento)/.test(t)) agent += 2;
   if (/(llamada\s+est[aá]\s+siendo\s+grabada|monitoread[ao]|calidad|ley\s+1581|protecci[oó]n\s+de\s+datos)/.test(t)) agent += 3;
   if (/(ofrezc|ofrecer|brindo|le\s+ofrezco|alternativas|descuento|cuotas|plan\s+de\s+pagos)/.test(t)) agent += 2;
   if (/(novarte[ck]|contacto\s+solutions|vartex|novartec)/.test(t)) agent += 2;
   if (/(link\s+de\s+pago|pse|portal\s+oficial|oficinas\s+autorizadas)/.test(t)) agent += 2;
-  if (/^buen[oa]s\s+(tardes|d[ií]as|noches)[,;\s]/.test(t) && /(le\s+habla|de\s+contacto|del\s+área|somos)/.test(t)) agent += 2;
+  if (/^buen[oa]s\s+(tardes|d[ií]as|noches)[,;\s]/.test(t) && /(le\s+habla|de\\s+contacto|del\\s+área|somos)/.test(t)) agent += 2;
 
-  // Señales típicas de cliente (situación personal, respuesta corta, agradecimientos)
   if (/(no\s+tengo|no\s+puedo|no\s+estoy\s+trabajando|estoy\s+desemplead[oa]|independiente|no\s+me\s+queda|no\s+me\s+alcanza)/.test(t)) client += 2;
   if (/(mi\s+prima|mi\s+familia|yo\s+puedo|yo\s+pag[oé]|no\s+entiendo|c[oó]mo\s+hago)/.test(t)) client += 1;
   if (/^(sí|si|no|ok|bueno|claro|listo|perfecto)[,.\s]*$/.test(t)) client += 2;
   if (/gracias/.test(t)) client += 1;
-
-  // Respuesta de monto/ocupación breve
   if (/^\$?\s*\d+([.,]\d+)?(\s*(mil|k|m|millones?))?$/.test(t)) client += 2;
   if (/^(emplead[oa]|independiente|pensionad[oa]|no\s+trabajo|buscando\s+empleo)\.?$/.test(t)) client += 2;
 
@@ -116,24 +105,17 @@ function scoreRoleHints(text = '') {
 }
 
 /**
- * Heurística para etiquetar roles en MONO con mejoras + overrides “duros”:
- * - Alterna turno cuando hay pausas >= GAP_THR.
- * - Handoff pregunta→respuesta: si la línea anterior (Agente) fue pregunta y la actual es corta/ack, forzamos Cliente.
- * - Histeresis por racha reciente y márgenes configurables.
- * - Overrides: si el texto coincide con AGENT_HINTS_RX -> Agente; si coincide con CLIENT_HINTS_RX -> Cliente.
- * - Merge de segmentos contiguos del MISMO rol.
- * - Post-pass: reetiqueta como Agente las líneas con “ley 1581 / llamada grabada / etc.” por seguridad.
+ * Heurística MONO para etiquetar roles; devuelve ["mm:ss Rol: texto", ...]
  */
 export function formatTranscriptLinesMono(segments = []) {
   if (!Array.isArray(segments) || segments.length === 0) return [];
 
-  const GAP_THR           = Number(process.env.MONO_GAP_THRESHOLD_SEC || 1.2);
-  const MERGE_THR         = Number(process.env.MONO_MERGE_THRESHOLD_SEC || 0.6);
-  const SWITCH_MARGIN     = Number(process.env.MONO_SWITCH_MARGIN || 2);
-  const SHORT_ACK_MAX     = Number(process.env.MONO_SHORT_ACK_MAX_CHARS || 14);
-  const STREAK_LOCK_SEC   = Number(process.env.MONO_STREAK_LOCK_SEC || 25);
+  const GAP_THR         = Number(process.env.MONO_GAP_THRESHOLD_SEC || 1.2);
+  const MERGE_THR       = Number(process.env.MONO_MERGE_THRESHOLD_SEC || 0.6);
+  const SWITCH_MARGIN   = Number(process.env.MONO_SWITCH_MARGIN || 2);
+  const SHORT_ACK_MAX   = Number(process.env.MONO_SHORT_ACK_MAX_CHARS || 14);
+  const STREAK_LOCK_SEC = Number(process.env.MONO_STREAK_LOCK_SEC || 25);
 
-  // Rol inicial por pistas en primeros S segundos / K segmentos
   const K = 8, S = 30;
   let agentScore = 0, clientScore = 0;
   for (let i = 0; i < segments.length && i < K; i++) {
@@ -148,7 +130,7 @@ export function formatTranscriptLinesMono(segments = []) {
   let lastEnd = 0;
 
   const raw = [];
-  const recent = []; // ventana para "racha" (últimos N segundos de evidencia)
+  const recent = [];
 
   const isQuestion = (txt = '') =>
     /[?¿]\s*$/.test(txt) || QUESTION_PATTERNS.some(rx => rx.test(txt));
@@ -166,7 +148,6 @@ export function formatTranscriptLinesMono(segments = []) {
     const text  = String(seg?.text || '').trim();
     if (!text) { lastEnd = Math.max(lastEnd, end); continue; }
 
-    // limpiar ventana reciente (racha)
     while (recent.length && (start - recent[0].t) > STREAK_LOCK_SEC) recent.shift();
 
     const sc = scoreRoleHints(text);
@@ -174,7 +155,6 @@ export function formatTranscriptLinesMono(segments = []) {
     const prevWasQuestion = !!(prev && isQuestion(prev.text));
     const prevRole = prev?.role || null;
 
-    // Overrides “duros”: si hay pista clara de agente/cliente, imponemos
     if (AGENT_HINTS_RX.test(text)) {
       currentRole = 'Agente';
       currentConfidence = Math.max(currentConfidence, sc.agent + 5);
@@ -182,10 +162,8 @@ export function formatTranscriptLinesMono(segments = []) {
       currentRole = 'Cliente';
       currentConfidence = Math.max(currentConfidence, sc.client + 3);
     } else {
-      // Cambio por gran silencio también sugiere cambio de turno
       const gap = Math.max(0, start - lastEnd);
 
-      // ------------- Regla fuerte: Q→A -------------
       if (prevRole === 'Agente' && prevWasQuestion) {
         const hasStrongAgent = (sc.agent - sc.client) >= (SWITCH_MARGIN + 1);
         const shortish       = text.trim().length <= 40;
@@ -193,29 +171,23 @@ export function formatTranscriptLinesMono(segments = []) {
           currentRole = 'Cliente';
           currentConfidence = Math.max(currentConfidence, sc.client + 2);
         } else {
-          // si es respuesta concreta corta (monto/ocupación), favorece cliente
           if (shortish && sc.client >= sc.agent) {
             currentRole = 'Cliente';
             currentConfidence = Math.max(currentConfidence, sc.client + 1);
           } else {
-            // mantener rol con histeresis
             if (currentRole === 'Agente') sc.agent += 1; else sc.client += 1;
           }
         }
       } else {
-        // ------------- Reglas generales / histeresis -------------
         if (currentRole === 'Agente') sc.agent += 1; else sc.client += 1;
 
-        // Pausa o pregunta reduce el margen de cambio
         let margin = SWITCH_MARGIN;
         if (gap >= GAP_THR || prevWasQuestion) margin = Math.max(0, SWITCH_MARGIN - 1);
 
-        // Racha: si hay mucha evidencia reciente a favor del rol actual, subimos umbral para cambiar
         const agg = recent.reduce((acc, r) => { acc.agent += r.agent; acc.client += r.client; return acc; }, {agent:0, client:0});
         if (agg.agent - agg.client >= 3 && currentRole === 'Agente') sc.agent += 1;
         if (agg.client - agg.agent >= 3 && currentRole === 'Cliente') sc.client += 1;
 
-        // Pistas muy fuertes corrigen rol sin margen
         if (sc.agent - sc.client >= (SWITCH_MARGIN + 1)) {
           currentRole = 'Agente';
           currentConfidence = sc.agent;
@@ -223,7 +195,6 @@ export function formatTranscriptLinesMono(segments = []) {
           currentRole = 'Cliente';
           currentConfidence = sc.client;
         } else {
-          // Cambio solo si el deseado supera la confianza actual + margen
           const desired = (sc.agent >= sc.client) ? 'Agente' : 'Cliente';
           const desiredScore = Math.max(sc.agent, sc.client);
           if (desired !== currentRole && desiredScore >= currentConfidence + margin) {
@@ -236,13 +207,12 @@ export function formatTranscriptLinesMono(segments = []) {
       }
     }
 
-    // Guardar y acumular racha
     raw.push({ role: currentRole, start, end, text });
     recent.push({ t: start, agent: sc.agent, client: sc.client });
     lastEnd = Math.max(lastEnd, end);
   }
 
-  // Merge cercano del mismo rol
+  // Merge cercano del mismo rol (usando MERGE_THR ya declarado arriba)
   const merged = [];
   for (const seg of raw) {
     const last = merged[merged.length - 1];
@@ -260,21 +230,52 @@ export function formatTranscriptLinesMono(segments = []) {
     if (AGENT_HINTS_RX.test(t)) merged[i].role = 'Agente';
   }
 
-  // Formato final "mm:ss Rol: texto"
   return merged.map(s => `${toClock(s.start)} ${s.role}: ${s.text}`);
+}
+
+/* =============== Selección de proveedor y firma tolerante =============== */
+
+/**
+ * Normaliza la firma:
+ * - (buffer, { provider, ...opts })
+ * - (buffer, filename, language, opts)
+ */
+function normalizeArgs(buffer, a1, a2, a3) {
+  let filename = 'audio.wav';
+  let language = 'es-ES';
+  let opts = {};
+
+  if (a1 && typeof a1 === 'object' && !(a1 instanceof Buffer)) {
+    // Forma corta: (buffer, opts)
+    opts = a1 || {};
+  } else {
+    // Forma larga: (buffer, filename, language, opts)
+    if (typeof a1 === 'string') filename = a1;
+    if (a2 && typeof a2 === 'string') language = a2;
+    if (a2 && typeof a2 === 'object') opts = a2;
+    if (a3 && typeof a3 === 'object') opts = a3;
+  }
+  return { filename, language, opts };
+}
+
+function resolveProvider(input) {
+  const fromReq = String(input || '').trim().toLowerCase();
+  if (fromReq === 'openai' || fromReq === 'faster') return fromReq;
+  const fromEnv = String(ENV_PROVIDER).toLowerCase();
+  if (fromEnv === 'openai' || fromEnv === 'faster') return fromEnv;
+  return 'openai';
 }
 
 /* =============== Transcripción (API) =============== */
 /**
- * Transcribe audio con Faster-Whisper (local) u OpenAI Whisper.
- * Devuelve SIEMPRE un objeto:
+ * Devuelve SIEMPRE:
  *  {
  *    text: string,
  *    segments: [{ start, end, text }],
- *    linesRoleLabeled: [ "mm:ss Rol: texto", ... ]  // MONO (heurística)
+ *    linesRoleLabeled: [ "mm:ss Rol: texto", ... ]
  *  }
  */
-export async function transcribeAudio(buffer, filename, language = 'es-ES', opts = {}) {
+export async function transcribeAudio(buffer, a1, a2, a3) {
   if (process.env.SKIP_TRANSCRIPTION === '1') {
     return {
       text: '(SKIP_TRANSCRIPTION=1) Transcripción omitida (usa el campo transcript del body si está).',
@@ -283,13 +284,17 @@ export async function transcribeAudio(buffer, filename, language = 'es-ES', opts
     };
   }
 
-  const provider = (opts.provider || ENV_PROVIDER).toLowerCase().trim();
+  const { filename, language, opts } = normalizeArgs(buffer, a1, a2, a3);
+  const provider = resolveProvider(opts?.provider);
 
   if (provider === 'openai') {
+    if (!process.env.OPENAI_API_KEY) {
+      throw new Error('OPENAI_API_KEY no configurada; no puedo usar OpenAI.');
+    }
     return transcribeAudioOpenAI(buffer, filename, language);
   }
 
-  // provider === 'faster' (local)
+  // provider === 'faster'
   return transcribeAudioLocal(buffer, filename, language);
 }
 
@@ -300,15 +305,13 @@ async function transcribeAudioOpenAI(buffer, filename, language) {
     timeout: Number(process.env.OPENAI_TIMEOUT_MS || 120000)
   });
 
-  // Más seguro en Node que usar new File(...)
-  const file = await toFile(Buffer.from(buffer), filename, {
+  const file = await toFile(Buffer.from(buffer), filename || 'audio.wav', {
     type: 'application/octet-stream'
   });
 
   const model = process.env.OPENAI_TRANSCRIPTION_MODEL || 'whisper-1';
   const lang  = (language || 'es-ES').split('-')[0];
 
-  // Pedimos "verbose_json" para obtener segmentos con timestamps
   const resp = await client.audio.transcriptions.create({
     file,
     model,
@@ -339,7 +342,7 @@ async function transcribeAudioLocal(buffer, filename, language) {
 
   const fd = new FormData();
   const blob = new Blob([buffer]);
-  fd.append('file', blob, filename);
+  fd.append('file', blob, filename || 'audio.wav');
   fd.append('language', (language || 'es-ES').split('-')[0]);
 
   try {
@@ -360,13 +363,11 @@ async function transcribeAudioLocal(buffer, filename, language) {
 
     const json = await resp.json().catch(() => ({}));
 
-    // Compatibilidad: algunos servidores devuelven { ok, text, segments? } y otros solo { text, segments? }
     const ok = (json.ok === undefined) ? true : !!json.ok;
     if (!ok) throw new Error(json.error || 'Faster-Whisper error');
 
     const text = String(json?.text || '').trim();
 
-    // Si el servidor devuelve segments, los usamos; si no, dejamos []
     const segments = Array.isArray(json?.segments)
       ? json.segments.map(s => ({
           start: s?.start ?? s?.offset ?? 0,

@@ -58,32 +58,22 @@
           <option value="openai">OpenAI Whisper (cloud)</option>
         </select>
 
-        <label for="matrix">Matriz (.xlsx)</label>
-        <input id="matrix" name="matrix" type="file" accept=".xlsx" required />
-
         <label for="audios">Audios (múltiples)</label>
         <input id="audios" name="audios" type="file" accept=".mp3,.wav,.m4a,audio/*" multiple required />
 
         <div class="field">
-          <label for="scriptFile">Guion de la campaña (.txt / .md, opcional)</label>
-          <input id="scriptFile" name="script" type="file" accept=".txt,.md,.pdf">
-          <small>Si lo adjuntas, se validará el uso del guion y las políticas específicas.</small>
-        </div>
-
-        <div class="field">
-          <label for="metodologia"><b>Metodología</b></label>
-          <select id="metodologia" name="metodologia" required>
-            <option value="">Selecciona una metodologia</option>
-            <option value="cobranza">Cobranza</option>
-            <option value="servicio">Servicio</option>
-            <option value="comercial">Comercial</option>
+          <label for="campania"><b>Campañas</b></label>
+          <!-- Se pobla por scripts.js (queda "Carteras Propias") -->
+          <select id="campania" name="campania" required>
+            <option value="">Cargando campañas…</option>
           </select>
         </div>
 
-        <div class="field" id="cartera-field" style="display:none">
-          <label for="cartera"><b>Cartera</b></label>
-          <select id="cartera" name="cartera">
-            <option value="">Selecciona cartera</option>
+        <div class="field" id="tipificacion-field" style="display:none">
+          <label for="tipificacion"><b>Tipificación</b></label>
+          <!-- Se puebla por scripts.js según la campaña -->
+          <select id="tipificacion" name="tipificacion">
+            <option value="">Selecciona tipificación</option>
           </select>
         </div>
 

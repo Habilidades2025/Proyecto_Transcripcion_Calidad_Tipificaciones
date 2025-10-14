@@ -147,7 +147,7 @@ textarea:focus-visible{
 /* ==== Alertas de fraude (individual + grupal) ==== */
 .fraud-box{
   background:#FFF7ED;                /* naranja muy claro */
-  border:1px solid #FDBA74;          /* borde naranja */
+  border:1px solid #FDBA74;
   border-left:6px solid #FB923C;     /* acento */
   box-shadow:0 2px 10px rgba(253,186,116,.35);
   border-radius:12px;
@@ -169,7 +169,7 @@ textarea:focus-visible{
   margin:4px 0;
 }
 .fraud-list li::before{
-  content:"🚫🚫 ";
+  content:"🚫 ";
   display:inline-block;
   margin-right:6px;
 }

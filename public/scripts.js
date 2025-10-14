@@ -1,6 +1,5 @@
 // ---------- Utils ----------
 function $(id) { return document.getElementById(id); }
-function setOut(obj) { const out = $('out'); if (out) out.textContent = typeof obj === 'string' ? obj : JSON.stringify(obj, null, 2); }
 function basename(p) { if (!p) return null; return p.toString().split(/[\\/]/).pop(); }
 function isHttpOrRoot(href) { return typeof href === 'string' && (href.startsWith('http://') || href.startsWith('https://') || href.startsWith('/')); }
 function filenameFromContentDisposition(h) {
@@ -30,38 +29,21 @@ function formatFraudItem(f) {
   const cita   = String(f.cita || '').trim();
   return `🚫 [${riesgo}] ${escapeHtml(tipo)}${cita ? ` — “${escapeHtml(cita)}”` : ''}`;
 }
-// Num seguro para UI (para la Nota)
-function numOrDash(n) {
-  const v = Number(n);
-  return Number.isFinite(v) ? Math.round(v) : '-';
-}
+function numOrDash(n) { const v = Number(n); return Number.isFinite(v) ? Math.round(v) : '-'; }
 
-// Helpers defensivos (evitan "Cannot set properties of null")
+// Helpers defensivos
 function setTextById(id, text) { const el = $(id); if (el) el.textContent = text ?? ''; }
 function setHtmlById(id, html) { const el = $(id); if (el) el.innerHTML = html ?? ''; }
-function renderListById(id, items) {
-  const el = $(id);
-  if (!el) return;
-  if (!Array.isArray(items) || items.length === 0) { el.innerHTML = '<li>—</li>'; return; }
-  el.innerHTML = items.map(i => `<li>${i}</li>`).join('');
-}
 
-// ---- Helpers nuevos para tolerancia a estructuras anidadas/planas ----
+// Tolerancia estructuras
 function pick(obj, path, fallback = undefined) {
   if (!obj || !path) return fallback;
   const parts = Array.isArray(path) ? path : String(path).split('.');
   let cur = obj;
-  for (const p of parts) {
-    if (cur && Object.prototype.hasOwnProperty.call(cur, p)) {
-      cur = cur[p];
-    } else {
-      return fallback;
-    }
-  }
+  for (const p of parts) { if (cur && Object.prototype.hasOwnProperty.call(cur, p)) cur = cur[p]; else return fallback; }
   return cur;
 }
 function arr(x) { return Array.isArray(x) ? x : (x == null ? [] : [x]); }
-// Normaliza porAtributo (venga en meta.porAtributo o consolidado.porAtributo)
 function flattenPorAtrib(meta) {
   const a = pick(meta, 'porAtributo') || pick(meta, 'consolidado.porAtributo') || [];
   return Array.isArray(a) ? a : [];
@@ -78,31 +60,16 @@ const $viewConsolidado = $('viewConsolidado');
 
 function setTabClasses(active) {
   const map = { transcribe: $tabTranscribe, analyze: $tabAnalyze, consolidado: $tabConsolidado };
-  Object.entries(map).forEach(([k, btn]) => {
-    if (!btn) return;
-    btn.className = (k === active) ? 'primary' : 'muted';
-  });
+  Object.entries(map).forEach(([k, btn]) => { if (btn) btn.className = (k === active) ? 'primary' : 'muted'; });
 }
-function showTranscribe() {
-  if (!$viewTranscribe || !$viewAnalyze || !$viewConsolidado) return;
-  setTabClasses('transcribe');
-  $viewTranscribe.style.display = '';
-  $viewAnalyze.style.display = 'none';
-  $viewConsolidado.style.display = 'none';
+function showTranscribe() { if(!$viewTranscribe||!$viewAnalyze||!$viewConsolidado)return;
+  setTabClasses('transcribe'); $viewTranscribe.style.display=''; $viewAnalyze.style.display='none'; $viewConsolidado.style.display='none';
 }
-function showAnalyze() {
-  if (!$viewTranscribe || !$viewAnalyze || !$viewConsolidado) return;
-  setTabClasses('analyze');
-  $viewTranscribe.style.display = 'none';
-  $viewAnalyze.style.display = '';
-  $viewConsolidado.style.display = 'none';
+function showAnalyze() { if(!$viewTranscribe||!$viewAnalyze||!$viewConsolidado)return;
+  setTabClasses('analyze'); $viewTranscribe.style.display='none'; $viewAnalyze.style.display=''; $viewConsolidado.style.display='none';
 }
-async function showConsolidado() {
-  if (!$viewTranscribe || !$viewAnalyze || !$viewConsolidado) return;
-  setTabClasses('consolidado');
-  $viewTranscribe.style.display = 'none';
-  $viewAnalyze.style.display = 'none';
-  $viewConsolidado.style.display = '';
+async function showConsolidado() { if(!$viewTranscribe||!$viewAnalyze||!$viewConsolidado)return;
+  setTabClasses('consolidado'); $viewTranscribe.style.display='none'; $viewAnalyze.style.display='none'; $viewConsolidado.style.display='';
   await reloadConsolidado();
 }
 $tabTranscribe?.addEventListener('click', showTranscribe);
@@ -119,6 +86,16 @@ const $txAgentChan = $('txAgentChannel');
 const $txBtn       = $('btnTranscribe');
 const $txStatus    = $('txStatus');
 const $txDownload  = $('txDownloadLink');
+
+async function readErrorMessage(resp) {
+  const ct = resp.headers.get('content-type') || '';
+  if (ct.includes('application/json')) {
+    try { const j = await resp.json(); if (j?.error) return j.error; } catch {}
+  } else {
+    try { const t = await resp.text(); if (t) return `${t.slice(0,200)}${t.length>200?'…':''}`; } catch {}
+  }
+  return `Error HTTP ${resp.status}`;
+}
 
 $formTx?.addEventListener('submit', async (e) => {
   e.preventDefault();
@@ -139,9 +116,9 @@ $formTx?.addEventListener('submit', async (e) => {
       if ($txMode?.value)       fd.append('mode', $txMode.value);
       if ($txAgentChan?.value)  fd.append('agentChannel', $txAgentChan.value);
 
-      if ($txStatus) $txStatus.textContent = `Transcribiendo ${files.length} audios... (esto puede tardar)`;
-      const resp = await fetch('/transcribe-zip', { method: 'POST', body: fd });
-      if (!resp.ok) { const err = await safeJson(resp); throw new Error(err?.error || `Error HTTP ${resp.status}`); }
+      if ($txStatus) $txStatus.textContent = `Transcribiendo ${files.length} audios...`;
+      const resp = await fetch('/transcribe-zip', { method: 'POST', body: fd, headers: { 'Accept':'application/zip,application/octet-stream,application/json' } });
+      if (!resp.ok) { throw new Error(await readErrorMessage(resp)); }
       const blob = await resp.blob();
       const cd = resp.headers.get('Content-Disposition');
       const suggest = filenameFromContentDisposition(cd) || 'transcripciones.zip';
@@ -162,8 +139,8 @@ $formTx?.addEventListener('submit', async (e) => {
       if ($txAgentChan?.value)  fd.append('agentChannel', $txAgentChan.value);
 
       if ($txStatus) $txStatus.textContent = `Transcribiendo ${files[0].name}...`;
-      const resp = await fetch('/transcribe-txt', { method: 'POST', body: fd });
-      if (!resp.ok) { const err = await safeJson(resp); throw new Error(err?.error || `Error HTTP ${resp.status}`); }
+      const resp = await fetch('/transcribe-txt', { method: 'POST', body: fd, headers: { 'Accept':'text/plain,application/json' } });
+      if (!resp.ok) { throw new Error(await readErrorMessage(resp)); }
       const blob = await resp.blob();
       const cd = resp.headers.get('Content-Disposition');
       let suggest = filenameFromContentDisposition(cd);
@@ -180,20 +157,21 @@ $formTx?.addEventListener('submit', async (e) => {
   } catch (err) {
     console.error('[TX][ERROR]', err);
     alert('Error transcribiendo: ' + (err?.message || err));
-    if ($txStatus) $txStatus.textContent = 'Ocurrió un error. Intenta nuevamente.';
+    if ($txStatus) $txStatus.textContent = 'Ocurrió un error. Revisa consola para detalles.';
   } finally {
     if ($txBtn) { $txBtn.disabled = false; $txBtn.textContent = 'Transcribir'; }
   }
 });
 
-async function safeJson(resp) { try { return await resp.json(); } catch { return null; } }
-
 // ---------- Analizar (BATCH) ----------
 const $formBatch   = $('formBatch');
-const $matrix      = $('matrix');
 const $audios      = $('audios');
 const $provider    = $('provider');
-const $scriptFile  = $('scriptFile'); // input opcional para guion
+
+// IDs del HTML (sin tildes)
+const $campania     = $('campania');
+const $tipiField    = $('tipificacion-field');
+const $tipificacion = $('tipificacion');
 
 // Progreso
 const $progressCard = $('progressCard');
@@ -207,10 +185,6 @@ const $detIndividual  = $('detIndividual');
 const $countInd       = $('countInd');
 const $individualList = $('individualList');
 
-const $metodologia  = $('metodologia');
-const $carteraField = $('cartera-field');
-const $cartera      = $('cartera');
-
 const $grpTotal   = $('grpTotal');
 const $grpAvg     = $('grpAvg');
 const $grpResumen = $('grpResumen');
@@ -219,33 +193,82 @@ const $grpCrit    = $('grpCrit');
 const $grpPlan    = $('grpPlan');
 
 // Fraude (grupo)
-const $grpFraudeCard = $('grpFraudeCard');                         // contenedor (se oculta si no hay alertas)
-const $grpFraudeList = $('grpFraudeList') || $('grpFraude');       // <ul>
+const $grpFraudeCard = $('grpFraudeCard');
+const $grpFraudeList = $('grpFraudeList') || $('grpFraude');
 
-$metodologia?.addEventListener('change', function () {
-  const metodologia = this.value;
-  if ($cartera) $cartera.innerHTML = '<option value="">Selecciona cartera</option>';
+// Prompts por Tipificación
+const TIPI_PROMPTS = {
+  'Novación': `
+Analiza la llamada "Novación".
+- Detecta si el cliente ya pagó o pagará: intención real, fecha y (si existe) monto y canal oficial.
+- Si faltan datos (monto/fecha/canal), marca "no_evidencia".
+- Devuelve: resumen (100-150 palabras), hallazgos[], fraude.alertas[].
+`.trim(),
+  'Propuesta de pago': `
+Analiza la llamada "Propuesta de pago".
+- Verifica recordatorio/fecha límite/beneficios; no fuerces negociación si el cliente solo confirma.
+- Devuelve: resumen, hallazgos[], fraude.alertas[].
+`.trim(),
+  'Abono': `
+Analiza la llamada "Abono".
+- Extrae SOLO lo dicho: monto, fecha(s) y canal oficial. Si no se cierra, marca "negociacion_no_cerrada".
+- Devuelve: resumen, hallazgos[], fraude.alertas[].
+`.trim()
+};
 
-  if (metodologia === 'cobranza') {
-    if ($carteraField) $carteraField.style.display = 'block';
-    [
-      { value: 'carteras_bogota',   text: 'Carteras propias Bogotá'  },
-      { value: 'carteras_medellin', text: 'Carteras propias Medellín'}
-    ].forEach(op => {
-      const option = document.createElement('option');
-      option.value = op.value; option.textContent = op.text;
-      $cartera?.appendChild(option);
-    });
-  } else {
-    if ($carteraField) $carteraField.style.display = 'none';
+// Campaña + Tipificación dependientes
+(function initCampaniaTipi() {
+  if ($campania) {
+    $campania.innerHTML = `
+      <option value="">Selecciona campaña</option>
+      <option value="Carteras Propias">Carteras Propias</option>
+    `;
   }
-});
+  if ($tipiField) $tipiField.style.display = 'none';
+
+  const TIPIS_BY_CAMPAIGN = {
+    'Carteras Propias': ['Novación', 'Propuesta de pago', 'Abono']
+  };
+
+  const fillTipisForCampaign = () => {
+    const camp = $campania?.value || '';
+    if (!$tipificacion) return;
+    if (!camp) {
+      $tipificacion.innerHTML = `<option value="">Selecciona tipificación</option>`;
+      if ($tipiField) $tipiField.style.display = 'none';
+      return;
+    }
+    const list = TIPIS_BY_CAMPAIGN[camp] || [];
+    $tipificacion.innerHTML = `<option value="">Selecciona tipificación</option>` +
+      list.map(t => `<option value="${t}">${t}</option>`).join('');
+    if ($tipiField) $tipiField.style.display = '';
+  };
+
+  $campania?.addEventListener('change', fillTipisForCampaign);
+  // Inicial (por si el navegador recuerda el valor por recarga)
+  fillTipisForCampaign();
+})();
 
 let evtSource = null;
 
+async function postFormExpectJson(url, fd) {
+  const resp = await fetch(url, { method: 'POST', body: fd, headers: { 'Accept':'application/json' } });
+  const ct = resp.headers.get('content-type') || '';
+  if (ct.includes('application/json')) {
+    const payload = await resp.json().catch(() => null);
+    return { ok: resp.ok && !!payload, status: resp.status, ct, payload };
+  } else {
+    const txt = await resp.text().catch(() => '');
+    return { ok: false, status: resp.status, ct, payload: { _html: txt } };
+  }
+}
+
 $formBatch?.addEventListener('submit', async (e) => {
   e.preventDefault();
-  if (!$matrix?.files?.length || !$audios?.files?.length) { alert('Adjunta una matriz y al menos un audio.'); return; }
+  if (!$audios?.files?.length) { alert('Adjunta al menos un audio.'); return; }
+
+  const tipiVisible = $tipiField && $tipiField.style.display !== 'none';
+  if (tipiVisible && !$tipificacion?.value) { alert('Selecciona una tipificación.'); return; }
 
   if ($progressCard) $progressCard.style.display = '';
   if ($resultsCard)  $resultsCard.style.display  = 'none';
@@ -254,22 +277,50 @@ $formBatch?.addEventListener('submit', async (e) => {
   if ($barProgress)  $barProgress.style.width    = '0%';
 
   const fd = new FormData();
-  fd.append('matrix', $matrix.files[0]);
   Array.from($audios.files).forEach(f => fd.append('audios', f));
-  if ($provider?.value)    fd.append('provider', $provider.value);
-  if ($metodologia?.value) fd.append('metodologia', $metodologia.value);
-  if ($cartera?.value)     fd.append('cartera', $cartera.value);
-  if ($scriptFile?.files?.[0]) fd.append('script', $scriptFile.files[0]);
+  if ($provider?.value)   fd.append('provider', $provider.value);
+  if ($campania?.value) { fd.append('campania', $campania.value); fd.append('campaña', $campania.value); }
+  if ($tipificacion?.value) {
+    fd.append('tipificacion', $tipificacion.value);
+    fd.append('tipi_prompt', TIPI_PROMPTS[$tipificacion.value] || '');
+  }
 
   try {
-    const r = await fetch('/batch/start', { method: 'POST', body: fd });
-    const j = await r.json();
-    if (!r.ok) { alert(j?.error || 'No se pudo iniciar el lote'); return; }
-    startSSE(j.jobId);
+    // 1) Intentar flujo SSE
+    let r = await postFormExpectJson('/batch/start', fd);
+    if (r.ok && r.payload?.jobId) { startSSE(r.payload.jobId); return; }
+
+    // 2) Fallback a proceso directo
+    r = await postFormExpectJson('/batch', fd);
+    if (r.ok && Array.isArray(r.payload?.results)) {
+      markProgressDone(Array.from($audios.files));
+      renderBatchResultsNew(r.payload);
+      return;
+    }
+
+    // 3) Mostrar diagnóstico
+    const htmlSnippet = (r.payload?._html || '').slice(0, 200);
+    console.error('[BATCH] Respuesta no JSON', { status:r.status, ct:r.ct, htmlSnippet });
+    alert(`Error iniciando lote: ${r.status} (${r.ct}). ${htmlSnippet ? 'Detalle: '+htmlSnippet : ''}`);
   } catch (err) {
     alert('Error iniciando lote: ' + (err?.message || err));
   }
 });
+
+function markProgressDone(files) {
+  if ($lblProgress) $lblProgress.textContent = `${files.length} / ${files.length}`;
+  if ($barProgress) $barProgress.style.width = '100%';
+  if ($listProgress) {
+    const frag = document.createDocumentFragment();
+    files.forEach((f, idx) => {
+      const d = document.createElement('div');
+      d.textContent = `✅ ${idx + 1}. ${f.name}`;
+      frag.appendChild(d);
+    });
+    $listProgress.innerHTML = '';
+    $listProgress.appendChild(frag);
+  }
+}
 
 function startSSE(jobId) {
   if (evtSource) { evtSource.close(); evtSource = null; }
@@ -308,15 +359,80 @@ function updateProgressUI(p) {
 
 async function loadBatchResult(jobId) {
   try {
-    const r = await fetch(`/batch/result/${jobId}`);
+    const r = await fetch(`/batch/result/${jobId}`, { headers: { 'Accept':'application/json' }});
     const j = await r.json();
-    if (!r.ok) { alert(j?.error || 'Error obteniendo resultados'); return; }
+    if (!r.ok) { throw new Error(j?.error || `HTTP ${r.status}`); }
     renderBatchResults(j);
   } catch (err) {
     alert('Error obteniendo resultados: ' + (err?.message || err));
   }
 }
 
+// Fallback cuando /batch devuelve results directamente
+function renderBatchResultsNew(payload) {
+  if ($resultsCard) $resultsCard.style.display = '';
+
+  const okItems = Array.isArray(payload?.results) ? payload.results.filter(x => x?.ok) : [];
+  if ($countInd) $countInd.textContent = String(okItems.length);
+  if ($individualList) $individualList.innerHTML = '';
+
+  okItems.forEach((it, idx) => {
+    const name      = it?.fileName || `audio_${idx+1}`;
+    const analisis  = it?.analisis || {};
+    const agente    = analisis?.agent_name || '-';
+    const cliente   = analisis?.client_name || '-';
+    const resumen   = analisis?.resumen || '';
+    const hallazgos = analisis?.hallazgos || [];
+    const fraude    = (analisis?.fraude?.alertas || []).map(formatFraudItem);
+    const transcriptMarked = String(it?.transcriptMarked || '').trim();
+
+    const det = document.createElement('details');
+    det.innerHTML = `
+      <summary><b>${escapeHtml(agente)}</b> — ${escapeHtml(cliente)} · <small>${escapeHtml(name)}</small></summary>
+      <div style="padding:8px 12px">
+        <p><b>Resumen:</b> ${resumen ? escapeHtml(resumen) : '(sin resumen)'}</p>
+        <p><b>Hallazgos:</b></p>
+        <ul>${hallazgos.length ? hallazgos.map(h => `<li>${escapeHtml(h)}</li>`).join('') : '<li>—</li>'}</ul>
+        ${fraude.length ? `<p><b>Alertas de fraude:</b></p><ul>${fraude.map(x => `<li>${x}</li>`).join('')}</ul>` : ''}
+        ${transcriptMarked ? `
+        <section style="margin:8px 0;">
+          <div style="font-weight:600;margin-bottom:4px;">Transcripción (tiempos y rol)</div>
+          <pre style="white-space:pre-wrap; font-family: ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:0.95rem;">${escapeHtml(transcriptMarked)}</pre>
+        </section>` : ''}
+      </div>
+    `;
+    $individualList?.appendChild(det);
+  });
+
+  // Resumen grupal (ligero)
+  const g = aggregateGroup(okItems);
+  setTextById('grpTotal',   String(g.total));
+  setTextById('grpAvg',     String(g.promedio));
+  setTextById('grpResumen', g.resumen || '');
+  setHtmlById('grpHall', g.hallTop.length ? g.hallTop.map(h => `<li>${escapeHtml(h)}</li>`).join('') : '<li>—</li>');
+  setTextById('grpCrit', '—');
+  setTextById('grpPlan', '—');
+
+  const hasFraud = Array.isArray(g.fraudeTop) && g.fraudeTop.length > 0;
+  if ($grpFraudeCard) $grpFraudeCard.style.display = hasFraud ? '' : 'none';
+  if ($grpFraudeList) {
+    $grpFraudeList.innerHTML = hasFraud ? g.fraudeTop.map(x => `<li>${formatFraudItem(x)}</li>`).join('') : '';
+  }
+}
+
+function aggregateGroup(results) {
+  const out = { total: results.length, promedio: '-', resumen: '', hallTop: [], fraudeTop: [] };
+  const hallCounts = new Map(); const fraudes = [];
+  for (const r of results) {
+    (r?.analisis?.hallazgos || []).forEach(x => hallCounts.set(x, (hallCounts.get(x) || 0) + 1));
+    (r?.analisis?.fraude?.alertas || []).forEach(x => fraudes.push(x));
+  }
+  out.hallTop = Array.from(hallCounts.entries()).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([text,count])=>`${text} (${count})`);
+  out.fraudeTop = fraudes.slice(0,10);
+  return out;
+}
+
+// --------- Render por lotes (SSE tradicional) ---------
 function renderBatchResults(result) {
   if ($resultsCard) $resultsCard.style.display = '';
 
@@ -325,9 +441,7 @@ function renderBatchResults(result) {
 
   if ($individualList) $individualList.innerHTML = '';
   items.forEach((it) => {
-    const meta = it.meta || {};
-
-    // --- Normalización de campos (flat y nested) ---
+    const meta        = it.meta || {};
     const analisis    = pick(meta, 'analisis') || pick(meta, 'analysis') || {};
     const consolidado = pick(meta, 'consolidado') || pick(meta, 'scoring') || {};
 
@@ -336,36 +450,23 @@ function renderBatchResults(result) {
     const callId  = pick(meta, 'metadata.callId') || pick(meta, 'callId') || '';
 
     const nota    = numOrDash(pick(meta, 'nota') ?? pick(consolidado, 'notaFinal'));
-
-    // Hallazgos: preferir analisis.hallazgos; fallback a meta.hallazgos
     const hallazgos = pick(analisis, 'hallazgos') || pick(meta, 'hallazgos') || [];
+    const afectadosCriticos = pick(consolidado, 'afectadosCriticos') || pick(analisis, 'afectadosCriticos') || pick(meta, 'afectadosCriticos') || [];
+    const noAplican = pick(consolidado, 'noAplican') || pick(analisis, 'noAplican') || pick(meta, 'noAplican') || [];
 
-    // Afectados críticos: SIEMPRE desde scoring/analysis (backend), jamás de “texto”
-    const afectadosCriticos =
-      pick(consolidado, 'afectadosCriticos') ||
-      pick(analisis, 'afectadosCriticos') ||
-      pick(meta, 'afectadosCriticos') || [];
+    // 🔴 NUEVO: fraude individual en SSE
+    const fraude = (pick(analisis, 'fraude.alertas') || []).map(formatFraudItem);
 
-    // No aplica (excluidos)
-    const noAplican =
-      pick(consolidado, 'noAplican') ||
-      pick(analisis, 'noAplican') ||
-      pick(meta, 'noAplican') || [];
-
-    // Plan de mejora por llamada (desde porAtributo donde cumplido=false con mejora)
     const porAtrib = flattenPorAtrib(meta);
-    const mejoras = porAtrib
-      .filter(a => a && a.aplica !== false && a.cumplido === false && a.mejora)
+    const mejoras = porAtrib.filter(a => a && a.aplica !== false && a.cumplido === false && a.mejora)
       .map(a => `<li><strong>${escapeHtml(a.atributo)}</strong>: ${escapeHtml(a.mejora)}</li>`);
 
-    // Transcripción marcada (mantener indentación)
     const transcriptMarked = String(pick(meta, 'transcriptMarked') || '').trim();
     const transcriptBlock = transcriptMarked
       ? `<section style="margin:8px 0;">
            <div style="font-weight:600;margin-bottom:4px;">Transcripción (tiempos y rol)</div>
            <pre style="white-space:pre-wrap; font-family: ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:0.95rem;">${escapeHtml(transcriptMarked)}</pre>
-         </section>`
-      : '';
+         </section>` : '';
 
     const resumen = pick(meta, 'resumen') || pick(analisis, 'resumen') || '';
 
@@ -374,78 +475,41 @@ function renderBatchResults(result) {
       <summary><b>${escapeHtml(agente)}</b> — ${escapeHtml(cliente)} · <span class="pill">Nota: ${nota}</span> · <small>${escapeHtml(callId)}</small></summary>
       <div style="padding:8px 12px">
         <p><b>Resumen:</b> ${resumen ? escapeHtml(resumen) : '(sin resumen)'}</p>
-
         <p><b>Hallazgos:</b></p>
         <ul>${(hallazgos || []).map(h => `<li>${escapeHtml(h)}</li>`).join('') || '<li>—</li>'}</ul>
-
+        <!-- 🔴 NUEVO: bloque fraude individual -->
+        ${fraude.length ? `<p><b>Alertas de fraude:</b></p><ul>${fraude.map(x => `<li>${x}</li>`).join('')}</ul>` : ''}
         <p><b>Afectados críticos:</b></p>
         <ul>${(arr(afectadosCriticos).length ? arr(afectadosCriticos).map(a => `<li>${escapeHtml(a)}</li>`).join('') : '<li>—</li>')}</ul>
-
         <p><b>No aplica:</b></p>
         <ul>${(arr(noAplican).length ? arr(noAplican).map(a => `<li>${escapeHtml(a)}</li>`).join('') : '<li>—</li>')}</ul>
-
-        ${mejoras.length ? `
-          <p><b>Plan de mejora:</b></p>
-          <ul>${mejoras.join('')}</ul>
-        ` : ''}
-
-        ${(() => {
-          // Render opcional: tabla compacta de porAtributo (útil para depurar NA vs incumplidos)
-          if (!porAtrib.length) return '';
-          const rows = porAtrib.map(a => {
-            const badge = (a.aplica === false || String(a.status||'').toUpperCase()==='NA') ? 'NA' : (a.cumplido ? '✅' : '❌');
-            const peso  = Number(a.peso ?? 0);
-            return `
-              <tr>
-                <td>${escapeHtml(a.atributo || '')}</td>
-                <td style="text-align:center">${badge}</td>
-                <td style="text-align:right">${peso}</td>
-                <td>${escapeHtml(a.justificacion || '')}</td>
-              </tr>
-            `;
-          }).join('');
-          return `
-            <details style="margin-top:10px;">
-              <summary style="cursor:pointer;font-weight:600;">Detalle por atributo</summary>
-              <div style="overflow:auto;">
-                <table class="mini">
-                  <thead><tr><th>Atributo</th><th>Estado</th><th>Peso</th><th>Justificación</th></tr></thead>
-                  <tbody>${rows}</tbody>
-                </table>
-              </div>
-            </details>
-          `;
-        })()}
-
+        ${mejoras.length ? `<p><b>Plan de mejora:</b></p><ul>${mejoras.join('')}</ul>` : ''}
         ${transcriptBlock}
       </div>
     `;
-    if ($individualList) $individualList.appendChild(det);
+    $individualList?.appendChild(det);
   });
 
-  // Resumen grupal
   const g = result.group || {};
-  setTextById('grpTotal',   String(g.total ?? g.totalCalls ?? 0));
+  setTextById('grpTotal',   String(g.total ?? g.totalCalls ?? items.length ?? 0));
   setTextById('grpAvg',     String(Number.isFinite(+g.promedio) ? Math.round(+g.promedio) : (g.averageScore ?? 0)));
   setTextById('grpResumen', g.resumen || '');
-
-  if ($grpHall) $grpHall.innerHTML = (g.topHallazgos || g.hallazgos || []).map(h => `<li>${escapeHtml(h)}</li>`).join('') || '<li>—</li>';
-
-  // Afectados críticos grupales (si el backend los resume)
+  setHtmlById('grpHall', (g.topHallazgos || g.hallazgos || []).map(h => `<li>${escapeHtml(h)}</li>`).join('') || '<li>—</li>');
   const critGroup = g.atributosCriticos || g.afectadosCriticos || [];
   setTextById('grpCrit',   Array.isArray(critGroup) ? critGroup.join(', ') : '—');
   setTextById('grpPlan',   g.planMejora || '');
 
-  // Fraude (grupo)
-  let topFraude = g.fraudeAlertasTop || g.topFraude || g.fraude || [];
-  if (!Array.isArray(topFraude)) topFraude = [];
-
-  const groupHasFraud = topFraude.length > 0;
-
-  if ($grpFraudeCard) $grpFraudeCard.style.display = groupHasFraud ? '' : 'none';
+  // 🔴 NUEVO: fraude (grupo) calculado desde items si no viene en g
+  const fraudesGrupo = [];
+  items.forEach(it => {
+    const arr = pick(it, 'meta.analisis.fraude.alertas') || [];
+    arr.forEach(x => fraudesGrupo.push(x));
+  });
+  const hasFraud = fraudesGrupo.length > 0;
+  if ($grpFraudeCard) $grpFraudeCard.style.display = hasFraud ? '' : 'none';
   if ($grpFraudeList) {
-    $grpFraudeList.innerHTML = groupHasFraud
-      ? topFraude.map(x => `<li>${formatFraudItem(x)}</li>`).join('')
+    $grpFraudeList.innerHTML = hasFraud
+      ? fraudesGrupo.slice(0, 10).map(x => `<li>${formatFraudItem(x)}</li>`).join('')
       : '';
   }
 }
@@ -455,7 +519,6 @@ const $btnReload = $('btnReload');
 const $summary   = $('summary');
 const $tbody     = document.querySelector('#tbl tbody');
 
-// (plegables) — Por agente / Por categoría
 function renderSummaryCompatible(s) {
   const isOld = s && (s.totalCalls !== undefined || s.byAgent || s.byCategory);
   const total = isOld ? (s.totalCalls ?? 0) : (s.total ?? 0);
@@ -498,7 +561,6 @@ function renderSummaryCompatible(s) {
     );
     html += chips.join('') || '<span>—</span>';
   } else if (Array.isArray(s?.porCategoria)) {
-    // soporta forma nueva { categoria, cumplimiento: { porcentaje } }
     const chips = s.porCategoria.map(c =>
       `<span class="pill">${(c.categoria || c.atributo || 'Categoría')}: ${Math.round((c.cumplimiento?.porcentaje ?? c.porcentaje) || 0)}%</span>`
     );
