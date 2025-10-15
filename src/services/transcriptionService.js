@@ -3,21 +3,22 @@ import OpenAI from 'openai';
 import { toFile } from 'openai/uploads';
 import { Agent, setGlobalDispatcher } from 'undici';
 
-// === Config de timeouts ===
+/* ===================== Config de timeouts (fetch/undici) ===================== */
 const FW_TIMEOUT_MS         = Number(process.env.FW_TIMEOUT_MS || 600000);         // abort total (10 min)
 const FW_HEADERS_TIMEOUT_MS = Number(process.env.FW_HEADERS_TIMEOUT_MS || 600000); // headers (10 min)
 const FW_BODY_TIMEOUT_MS    = Number(process.env.FW_BODY_TIMEOUT_MS || 3600000);   // body (60 min)
 
-// Dispatcher global para elevar límites de undici/fetch
 setGlobalDispatcher(new Agent({
   headersTimeout: FW_HEADERS_TIMEOUT_MS,
   bodyTimeout: FW_BODY_TIMEOUT_MS
 }));
 
-// Valor por defecto del .env (default del servidor)
-const ENV_PROVIDER = String(process.env.TRANSCRIBE_PROVIDER || 'openai').toLowerCase().trim();
+/* ============================ Defaults de entorno ============================ */
+const ENV_PROVIDER = String(process.env.TRANSCRIBE_PROVIDER || 'openai')
+  .toLowerCase()
+  .trim();
 
-/* ================= Utilidades ================= */
+/* ================================ Utilidades ================================= */
 
 /** Convierte segundos a mm:ss */
 function toClock(sec = 0) {
@@ -79,10 +80,7 @@ const CLIENT_HINTS_RX = new RegExp([
   '(mi\\s+prima|mi\\s+familia|mi\\s+espos[oa])\\b'
 ].join('|'), 'i');
 
-/**
- * Scoring de pistas por rol en una línea.
- * Devuelve { agent, client } con pesos heurísticos.
- */
+/** Scoring de pistas por rol en una línea. Devuelve { agent, client } */
 function scoreRoleHints(text = '') {
   const t = norm(text);
   let agent = 0, client = 0;
@@ -104,9 +102,7 @@ function scoreRoleHints(text = '') {
   return { agent, client };
 }
 
-/**
- * Heurística MONO para etiquetar roles; devuelve ["mm:ss Rol: texto", ...]
- */
+/** Heurística MONO para etiquetar roles; devuelve ["mm:ss Rol: texto", ...] */
 export function formatTranscriptLinesMono(segments = []) {
   if (!Array.isArray(segments) || segments.length === 0) return [];
 
@@ -212,7 +208,7 @@ export function formatTranscriptLinesMono(segments = []) {
     lastEnd = Math.max(lastEnd, end);
   }
 
-  // Merge cercano del mismo rol (usando MERGE_THR ya declarado arriba)
+  // Merge cercano del mismo rol
   const merged = [];
   for (const seg of raw) {
     const last = merged[merged.length - 1];
@@ -224,7 +220,7 @@ export function formatTranscriptLinesMono(segments = []) {
     }
   }
 
-  // Post-pass: asegura que frases de compliance/presentación queden como Agente
+  // Asegura que frases de compliance/presentación queden como Agente
   for (let i = 0; i < merged.length; i++) {
     const t = merged[i].text || '';
     if (AGENT_HINTS_RX.test(t)) merged[i].role = 'Agente';
@@ -233,11 +229,10 @@ export function formatTranscriptLinesMono(segments = []) {
   return merged.map(s => `${toClock(s.start)} ${s.role}: ${s.text}`);
 }
 
-/* =============== Selección de proveedor y firma tolerante =============== */
-
+/* ==================== Selección de proveedor y firma tolerante ==================== */
 /**
- * Normaliza la firma:
- * - (buffer, { provider, ...opts })
+ * Soporta:
+ * - (buffer, { provider, language, mimetype, model })
  * - (buffer, filename, language, opts)
  */
 function normalizeArgs(buffer, a1, a2, a3) {
@@ -246,10 +241,10 @@ function normalizeArgs(buffer, a1, a2, a3) {
   let opts = {};
 
   if (a1 && typeof a1 === 'object' && !(a1 instanceof Buffer)) {
-    // Forma corta: (buffer, opts)
     opts = a1 || {};
+    if (opts.filename) filename = String(opts.filename);
+    if (opts.language) language = String(opts.language);
   } else {
-    // Forma larga: (buffer, filename, language, opts)
     if (typeof a1 === 'string') filename = a1;
     if (a2 && typeof a2 === 'string') language = a2;
     if (a2 && typeof a2 === 'object') opts = a2;
@@ -260,13 +255,16 @@ function normalizeArgs(buffer, a1, a2, a3) {
 
 function resolveProvider(input) {
   const fromReq = String(input || '').trim().toLowerCase();
-  if (fromReq === 'openai' || fromReq === 'faster') return fromReq;
+  const allowed = new Set(['openai', 'faster', 'deepgram']);
+  if (allowed.has(fromReq)) return fromReq;
+
   const fromEnv = String(ENV_PROVIDER).toLowerCase();
-  if (fromEnv === 'openai' || fromEnv === 'faster') return fromEnv;
+  if (allowed.has(fromEnv)) return fromEnv;
+
   return 'openai';
 }
 
-/* =============== Transcripción (API) =============== */
+/* ============================ Transcripción (API) ============================ */
 /**
  * Devuelve SIEMPRE:
  *  {
@@ -294,11 +292,24 @@ export async function transcribeAudio(buffer, a1, a2, a3) {
     return transcribeAudioOpenAI(buffer, filename, language);
   }
 
-  // provider === 'faster'
+  if (provider === 'deepgram') {
+    if (!process.env.DEEPGRAM_API_KEY) {
+      throw new Error('DEEPGRAM_API_KEY no configurada; no puedo usar Deepgram.');
+    }
+    return transcribeAudioDeepgram(
+      buffer,
+      filename,
+      language,
+      opts?.mimetype || guessMimeFromName(filename),
+      opts?.model || process.env.DEEPGRAM_MODEL
+    );
+  }
+
+  // provider === 'faster' (Faster-Whisper local)
   return transcribeAudioLocal(buffer, filename, language);
 }
 
-/* =============== OpenAI Whisper (cloud) =============== */
+/* ============================== OpenAI Whisper ============================== */
 async function transcribeAudioOpenAI(buffer, filename, language) {
   const client = new OpenAI({
     apiKey: process.env.OPENAI_API_KEY,
@@ -332,7 +343,92 @@ async function transcribeAudioOpenAI(buffer, filename, language) {
   return { text, segments, linesRoleLabeled };
 }
 
-/* =============== Faster-Whisper local (fw-server) =============== */
+/* ========================== Deepgram (HTTP /listen) ========================== */
+function guessMimeFromName(name = '') {
+  const n = String(name || '').toLowerCase();
+  if (n.endsWith('.wav'))  return 'audio/wav';
+  if (n.endsWith('.mp3'))  return 'audio/mpeg';
+  if (n.endsWith('.m4a'))  return 'audio/m4a';
+  if (n.endsWith('.aac'))  return 'audio/aac';
+  if (n.endsWith('.ogg'))  return 'audio/ogg';
+  if (n.endsWith('.webm')) return 'audio/webm';
+  if (n.endsWith('.flac')) return 'audio/flac';
+  return 'application/octet-stream';
+}
+
+async function transcribeAudioDeepgram(buffer, filename, language, mimetype, model) {
+  const key = process.env.DEEPGRAM_API_KEY;
+  const base = 'https://api.deepgram.com/v1/listen';
+  const lang = (language || 'es-ES').split('-')[0] || 'es';
+
+  const url = new URL(base);
+  url.searchParams.set('smart_format', 'true');
+  url.searchParams.set('punctuate', 'true');
+  url.searchParams.set('utterances', 'true');     // para segmentos con tiempos
+  url.searchParams.set('model', model || 'nova-2');
+  url.searchParams.set('language', lang);
+
+  const resp = await fetch(url.toString(), {
+    method: 'POST',
+    headers: {
+      'Authorization': `Token ${key}`,
+      'Content-Type': mimetype || 'audio/mpeg',
+      'Accept': 'application/json'
+    },
+    body: Buffer.from(buffer)
+  });
+
+  if (!resp.ok) {
+    const t = await resp.text().catch(() => '');
+    throw new Error(`Deepgram error ${resp.status}: ${t.slice(0, 300)}`);
+  }
+
+  const j = await resp.json().catch(() => ({}));
+
+  const text = String(
+    j?.results?.channels?.[0]?.alternatives?.[0]?.transcript || ''
+  ).trim();
+
+  let segments = [];
+  // 1) Mejor opción: utterances (con start/end)
+  if (Array.isArray(j?.results?.utterances) && j.results.utterances.length) {
+    segments = j.results.utterances.map(u => ({
+      start: Number(u?.start ?? 0),
+      end:   Number(u?.end ?? ((u?.start ?? 0) + 2)),
+      text:  String(u?.transcript || '')
+    }));
+  } else {
+    // 2) Fallback: agrupar por palabras con gap
+    const words = j?.results?.channels?.[0]?.alternatives?.[0]?.words || [];
+    const GAP = 0.8;     // segundos
+    const MAX_DUR = 8;   // segundos
+    let cur = null;
+    for (const w of words) {
+      const wstart = Number(w?.start ?? w?.start_time ?? 0);
+      const wend   = Number(w?.end   ?? w?.end_time   ?? (wstart + 0.2));
+      const wtext  = String(w?.punctuated_word || w?.word || '').trim();
+      if (!wtext) continue;
+
+      if (!cur) { cur = { start: wstart, end: wend, text: wtext }; continue; }
+      const gap = Math.max(0, wstart - cur.end);
+      const dur = Math.max(0, cur.end - cur.start);
+
+      if (gap > GAP || dur > MAX_DUR) {
+        segments.push(cur);
+        cur = { start: wstart, end: wend, text: wtext };
+      } else {
+        cur.text = `${cur.text} ${wtext}`.replace(/\s+/g, ' ').trim();
+        cur.end = wend;
+      }
+    }
+    if (cur) segments.push(cur);
+  }
+
+  const linesRoleLabeled = formatTranscriptLinesMono(segments);
+  return { text, segments, linesRoleLabeled };
+}
+
+/* ===================== Faster-Whisper local (fw-server) ===================== */
 async function transcribeAudioLocal(buffer, filename, language) {
   let url = (process.env.FW_SERVER_URL || 'http://127.0.0.1:8000/transcribe')
               .trim()

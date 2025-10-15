@@ -54,9 +54,8 @@ function detectFraudHeuristics(transcriptText = '') {
   });
 }
 
-/* ==================== Reglas por TIPIFICACIÓN ==================== */
+/* ==================== Reglas por TIPIFICACIÓN (genéricas) ==================== */
 const TIPI_RULES = {
-  // Algunas reglas de ejemplo (puedes extenderlas según tu operación)
   'promesa de pago': `
 - Si el cliente muestra intención de pago, extrae (si aparece) MONTO, FECHA y CANAL de pago.
 - Prioriza confirmar: fecha concreta, monto concreto, canal OFICIAL (ej.: ${OFFICIAL_PAY_CHANNELS.join(', ')}).
@@ -69,7 +68,10 @@ const TIPI_RULES = {
   'acuerdo de pago': `
 - Si hay acuerdo, extrae monto(s), fecha(s) y canal oficial. Si no se cierra, marca "negociacion_en_proceso".`.trim(),
 
-  'novacion': '' // se rellena dinámicamente por campaña (ver bloque Novación)
+  // estos se inyectan dinámicamente por campaña:
+  'novacion': '',
+  'propuesta de pago': '',
+  'abono': ''
 };
 
 /** Normaliza tipificación para indexar TIPI_RULES */
@@ -81,7 +83,22 @@ function keyTipi(t = '') {
     .trim();
 }
 
-/* =============== NOVACIÓN (Carteras Propias): ítems críticos =============== */
+/* =============== Ítems críticos (Matriz V4) =============== */
+// Propuesta de pago y Abono comparten los mismos 11 ítems de la matriz V4:
+const PPY_ABONO_ITEMS = [
+  '1. Informa beneficios y consecuencias de no pago',
+  '2. Realiza proceso completo de confirmación de la negociación',
+  '3. Indaga motivo del no pago',
+  '4. Solicita autorización para contacto por otros medios (Ley 1581)',
+  '5. Despedida según guion establecido',
+  '6. Ofrece alternativas acordes a la realidad del cliente y políticas vigentes',
+  '7. Debate objeciones según situación del cliente',
+  '8. Informa que la llamada es grabada y monitoreada (Ley 1581)',
+  '9. Usa guion completo establecido por la campaña',
+  '10. Evita argumentos engañosos con el cliente',
+  '11. Utiliza vocabulario prudente y respetuoso'
+];
+
 const NOVACION_ITEMS = [
   '1. Informa beneficios y consecuencias de aceptar la novación',
   '2. Realiza proceso completo de confirmación de la novación (monto, cuotas, tasa y plazos)',
@@ -96,75 +113,119 @@ const NOVACION_ITEMS = [
   '11. Utiliza vocabulario prudente y respetuoso'
 ];
 
+/* =============== Prompts específicos por caso =============== */
+function strictEvidenceBlock() {
+  return `
+REGLA DE EVIDENCIA (muy estricta):
+• Para marcar **cumplido=true** en un ítem, la "justificacion" DEBE incluir **una cita textual entre comillas** extraída de la transcripción (≈8+ palabras) y, si existe, el tiempo aproximado (“00:38”).
+• Si **no hay cita literal**, escribe "no_evidencia" y pon **cumplido=false**.
+• Frases genéricas (“sí, correcto”, “perfecto”, “quedo pendiente por WhatsApp”) **no valen** como evidencia.
+• No infieras ni parafrasees sin cita: ante duda, **no_evidencia**.
+`.trim();
+}
+
+/* --- Novación (Carteras Propias) --- */
 function buildNovacionExtraPrompt() {
   return `
 EVALUACIÓN ESPECÍFICA — NOVACIÓN (Carteras Propias)
+Definición: el titular acepta un **nuevo crédito** con Contacto Solutions para saldar la deuda anterior (nuevo contrato; 5–68 cuotas; nueva tasa/plazo).
 
-Definición operativa: Novación = el titular acepta expresamente un **nuevo crédito** con Contacto Solutions para saldar la deuda anterior (nuevo contrato, nueva tasa, plazo entre 5 y 68 cuotas, nuevas condiciones).
-
-DECISIÓN PREVIA (aplica/0 pts):
-• Si **NO hay aceptación formal de novación**, devuelve:
+DECISIÓN PREVIA:
+• Si **NO** hay aceptación formal de novación:
   - "novacion.aceptada": false
   - "novacion.motivo_no_aplica": "No aplica — sin aceptación formal de novación."
-  - En "consolidado.porAtributo": marca todos los ítems con "aplica": false
+  - En "consolidado.porAtributo": marca todos "aplica": false
   - "consolidado.notaFinal": 0
-  - En "fraude.alertas" añade: { "tipo": "novacion_invalida", "riesgo": "alto", "cita": "frase breve verificable" }
-  - FIN (no intentes evaluar la matriz).
+  - En "fraude.alertas": { "tipo":"novacion_invalida", "riesgo":"alto", "cita":"frase breve verificable" }
+  - FIN.
 
-REGLA DE EVIDENCIA (muy estricta):
-• Para marcar **cumplido=true** en un ítem, la "justificacion" DEBE incluir **una cita textual entre comillas** extraída de la transcripción (≥ 8 palabras) y, si existen, el tiempo aproximado (por ejemplo “00:38”).
-• Si **no hay cita literal**, escribe "no_evidencia" y pon **cumplido=false**.
-• Respuestas genéricas como “sí, correcto”, “perfecto”, “quedo pendiente por WhatsApp” **no valen** como evidencia.
-• No infieras ni parafrasees sin cita: ante duda, **no_evidencia**.
+${strictEvidenceBlock()}
 
 ÍTEMS CRÍTICOS (peso 100% si aplica):
-1) **Beneficios y consecuencias** de aceptar la novación  
-   Cumple solo si el agente menciona **ambos** con cita (ej.: beneficios como “repone historial/retira reporte” **y** consecuencias/compromiso de pago).  
-   No aplica: solo si no se avanza a oferta/aceptación.
+${NOVACION_ITEMS.map(s => `- ${s}`).join('\n')}
 
-2) **Confirmación completa** del nuevo crédito (**monto + nº de cuotas + tasa + plazo/fecha**)  
-   Cumple solo si aparecen los **cuatro** elementos con cita. Si falta uno → **no cumple**.  
-   No aplica: llamada se corta antes de confirmar.
+CÁLCULO DE NOTA (binaria):
+• Considera solo ítems con "aplica": true.
+• Si **alguno** aplicable tiene "cumplido": false → **notaFinal = 0**.
+• Si **todos** los aplicables tienen "cumplido": true → **notaFinal = 100**.
+• Si ningún ítem aplica (caso raro), notaFinal = 100 (no penaliza).
 
-3) **Indaga motivo** por el cual el titular requiere la novación  
-   Cumple si se hace una **pregunta abierta** y queda el **motivo** registrado con cita. Si el agente asume → no cumple.
-
-4) **Solicita autorización** para contacto por otros medios  
-   Cumple si el agente **pide consentimiento explícito** (“¿autoriza… WhatsApp/SMS/correo?”) y registra aceptación/negativa con cita.  
-   Palabras clave esperadas en la cita: autoriza/permite/consentimiento.
-
-5) **Despedida** según guion (cierre cordial y próximos pasos)  
-   Cumple si hay despedida + próximos pasos con cita.
-
-6) **Explica condiciones** del nuevo crédito (coherentes con 2)  
-   Cumple si se detallan condiciones (cuotas, tasa, beneficios) con cita literal; contradicciones con (2) → no cumple.
-
-7) **Gestiona objeciones** sobre tasa o plazo con argumentos  
-   Cumple si **hubo objeción** y el agente la atiende con argumentos reales (cita).  
-   No aplica si no hubo objeciones.
-
-8) **Informa grabación/monitoreo** (Ley 1581)  
-   Cumple si el agente lo dice explícitamente (palabras esperadas: “grabada”, “monitoreo”, “calidad”, “Ley 1581”) con cita.
-
-9) **Uso de guion completo de novación**  
-   Cumple si se observan las etapas clave (presentación, verificación, explicación, confirmaciones, consentimiento, cierre) con **al menos una cita** que referencie 2 pasos distintos.
-
-10) **Evita argumentos engañosos o coercitivos**  
-   Cumple si NO hay frases engañosas/amenazantes; si las hay, marca “no cumple” y añade alerta de fraude con la cita.
-
-11) **Vocabulario prudente y respetuoso**  
-   Cumple si el trato es profesional; citas ofensivas → no cumple.
-
-CÁLCULO DE NOTA (conservador):
-• Considera solo los ítems con "aplica": true.  
-• Si **cualquier** ítem aplicable tiene "cumplido": false → **notaFinal = 0**.  
-• Si **todos** los ítems aplicables tienen "cumplido": true → **notaFinal = 100**.  
-• Si ningún ítem aplica (caso raro con aceptación falsa), notaFinal = 0.
-
-FRAUDE (además de “novacion_invalida”):
-• Señala "cuenta_no_oficial" o "contacto_numero_no_oficial" si se piden consignaciones o se entrega un número personal/no oficial (incluye cita y riesgo).`.trim();
+FRAUDE:
+• Además de “novacion_invalida”, marca:
+  - "cuenta_no_oficial" cuando pidan consignar/transferir a canal NO oficial.
+  - "contacto_numero_no_oficial" por números personales o WhatsApp personal.
+`.trim();
 }
 
+/* --- Propuesta de pago (Carteras Propias) --- */
+function buildPropuestaPagoExtraPrompt() {
+  return `
+EVALUACIÓN ESPECÍFICA — PROPUESTA DE PAGO (Carteras Propias)
+Definición: el cliente **acepta y se compromete** al pago (negociación cerrada), definiendo **monto y/o fecha y/o medio** de pago.
+
+DECISIÓN PREVIA:
+• Si **NO** hay propuesta de pago (no hay compromiso verbal claro), devuelve:
+  - "propuesta_pago.aceptada": false
+  - "propuesta_pago.motivo_no_aplica": "No aplica — sin propuesta de pago."
+  - Marca todos los ítems con "aplica": false
+  - "consolidado.notaFinal": 0
+  - FIN.
+
+${strictEvidenceBlock()}
+
+ÍTEMS CRÍTICOS (peso 100% si aplica):
+${PPY_ABONO_ITEMS.map(s => `- ${s}`).join('\n')}
+
+Consideraciones:
+- En (2) “confirmación completa de la negociación”, para **cumplir** espera confirmación **explícita** de monto **y** fecha **y** medio de pago (si uno falta → no cumple).
+- En (6) alternativas, valida que sean acordes a realidad y políticas (no forzar pago total si el cliente planteó límites).
+
+CÁLCULO DE NOTA (binaria):
+• Solo ítems con "aplica": true.
+• Si **alguno** aplicable es "cumplido=false" → **notaFinal = 0**.
+• Si **todos** los aplicables son "cumplido=true" → **notaFinal = 100**.
+• Si nada aplica, **notaFinal = 100** (no penaliza).
+
+FRAUDE:
+• Canales NO oficiales de pago → "cuenta_no_oficial".
+• Contactos NO oficiales (número personal/WhatsApp) → "contacto_numero_no_oficial".
+`.trim();
+}
+
+/* --- Abono (Carteras Propias) --- */
+function buildAbonoExtraPrompt() {
+  return `
+EVALUACIÓN ESPECÍFICA — ABONO (Carteras Propias)
+Definición: el cliente **acepta realizar un pago parcial (abono)** a la obligación, definiendo **monto y/o fecha y/o medio**; no liquida la totalidad.
+
+DECISIÓN PREVIA:
+• Si **NO** hay compromiso de abono parcial, devuelve:
+  - "abono.aceptado": false
+  - "abono.motivo_no_aplica": "No aplica — sin compromiso de abono."
+  - Marca todos los ítems "aplica": false
+  - "consolidado.notaFinal": 0
+  - FIN.
+
+${strictEvidenceBlock()}
+
+ÍTEMS CRÍTICOS (peso 100% si aplica):
+${PPY_ABONO_ITEMS.map(s => `- ${s}`).join('\n')}
+
+Consideraciones:
+- En (2) “confirmación completa”, para **cumplir** espera confirmación **explícita** del abono: monto **y** fecha **y** medio (si falta cualquiera → no cumple).
+- En (6) alternativas, verifica que el asesor ofrezca opciones reales acordes a capacidad y políticas (p.ej., permitir abono cuando es viable).
+
+CÁLCULO DE NOTA (binaria):
+• Solo ítems con "aplica": true.
+• Si **alguno** aplicable es "cumplido=false" → **notaFinal = 0**.
+• Si **todos** los aplicables son "cumplido=true" → **notaFinal = 100**.
+• Si nada aplica, **notaFinal = 100** (no penaliza).
+
+FRAUDE:
+• Señala "cuenta_no_oficial" cuando se pida consignar/transferir a canal NO oficial.
+• Señala "contacto_numero_no_oficial" por uso de números/WhatsApp personales.
+`.trim();
+}
 
 /* ==================== Helpers de consolidado (post-proceso) ==================== */
 function normalizePorAtributo(list = []) {
@@ -185,28 +246,54 @@ function deriveAffectedCriticos(porAtrib = []) {
     .filter(Boolean);
 }
 
-function computeNovacionScore(porAtrib = [], accepted = true) {
+/** Regla binaria 100/0; si no aceptado → 0; si no hay aplicables → 100 (no penaliza) */
+function computeBinaryScore(porAtrib = [], accepted = true) {
   if (!accepted) return 0;
   const aplicables = porAtrib.filter(a => a.aplica === true);
-  if (aplicables.length === 0) return 100; // no aplica nada => no afecta
+  if (aplicables.length === 0) return 100;
   const anyFail = aplicables.some(a => a.cumplido === false);
   return anyFail ? 0 : 100;
 }
 
-/** Ajusta/garantiza consolidado para Novación (nota y afectados) */
-function ensureNovacionConsolidado(analisis = {}) {
-  const accepted = analisis?.novacion?.aceptada !== false; // si falta el campo, asumimos true para no penalizar
-  const rawPorAttr = Array.isArray(analisis?.consolidado?.porAtributo)
-    ? analisis.consolidado.porAtributo
-    : [];
+function ensureBlock(list, labels) {
+  // Si el modelo no devolvió todos los ítems, no forzamos completarlos,
+  // pero sí mantenemos lo recibido consistente.
+  return normalizePorAtributo(Array.isArray(list) ? list : []);
+}
 
-  // Si el modelo no devolvió todos los ítems, no forzamos completar, pero sí normalizamos lo que vino.
-  let porAtributo = normalizePorAtributo(rawPorAttr);
+function ensureConsolidadoForType(analisis = {}, type) {
+  let accepted = true;
+  let rawPorAttr = [];
 
-  // Calcular nota
-  const nota = computeNovacionScore(porAtributo, accepted);
+  if (type === 'novacion') {
+    accepted = analisis?.novacion?.aceptada !== false;
+    rawPorAttr = analisis?.consolidado?.porAtributo;
+    // Garantiza fraude si explícitamente no aceptada
+    if (analisis?.novacion && analisis.novacion.aceptada === false) {
+      const list = Array.isArray(analisis?.fraude?.alertas) ? analisis.fraude.alertas : [];
+      const has = list.some(a => a?.tipo === 'novacion_invalida');
+      if (!has) {
+        (analisis.fraude = analisis.fraude || {}).alertas = list.concat([{
+          tipo: 'novacion_invalida',
+          riesgo: 'alto',
+          cita: 'No hay aceptación expresa de novación, pero se intenta cerrar.'
+        }]);
+      }
+    }
+  }
 
-  // Afectados críticos
+  if (type === 'propuesta_pago') {
+    accepted = analisis?.propuesta_pago?.aceptada !== false;
+    rawPorAttr = analisis?.consolidado?.porAtributo;
+  }
+
+  if (type === 'abono') {
+    accepted = analisis?.abono?.aceptado !== false;
+    rawPorAttr = analisis?.consolidado?.porAtributo;
+  }
+
+  const porAtributo = ensureBlock(rawPorAttr);
+  const nota = computeBinaryScore(porAtributo, accepted);
   const afectadosCriticos = deriveAffectedCriticos(porAtributo);
 
   analisis.consolidado = {
@@ -215,20 +302,6 @@ function ensureNovacionConsolidado(analisis = {}) {
     porAtributo,
     afectadosCriticos
   };
-
-  // Si explícitamente NO aceptada, garantizamos fraude novacion_invalida
-  if (analisis?.novacion && analisis.novacion.aceptada === false) {
-    const list = Array.isArray(analisis?.fraude?.alertas) ? analisis.fraude.alertas : [];
-    const has = list.some(a => a?.tipo === 'novacion_invalida');
-    if (!has) {
-      (analisis.fraude = analisis.fraude || {}).alertas = list.concat([{
-        tipo: 'novacion_invalida',
-        riesgo: 'alto',
-        cita: 'No hay aceptación expresa de novación, pero se intenta cerrar.'
-      }]);
-    }
-  }
-
   return analisis;
 }
 
@@ -247,9 +320,12 @@ export async function analyzeTranscriptSimple({
   const MAX_TOKENS = Number(process.env.ANALYSIS_MAX_TOKENS) || 1100;
 
   const tipKey = keyTipi(tipificacion);
-  const isNovacionCP =
-    keyTipi(campania) === 'carteras propias' &&
-    (tipKey === 'novacion' || tipKey === 'novación');
+  const campKey = keyTipi(campania);
+
+  const isCP = campKey === 'carteras propias';
+  const isNovacionCP      = isCP && (tipKey === 'novacion' || tipKey === 'novación');
+  const isPropuestaPagoCP = isCP && (tipKey === 'propuesta de pago' || tipKey === 'propuesta_pago');
+  const isAbonoCP         = isCP && (tipKey === 'abono');
 
   // ---- System prompt (siempre con canales oficiales para marcar fraude) ----
   const system = `
@@ -260,7 +336,10 @@ Marca alertas de FRAUDE si el agente pide consignar/transferir a canal NO oficia
 `.trim();
 
   // ---- Extra prompt específico por tipificación/campaña ----
-  const extraTip = isNovacionCP ? buildNovacionExtraPrompt() : (TIPI_RULES[tipKey] || '');
+  let extraTip = (TIPI_RULES[tipKey] || '');
+  if (isNovacionCP)       extraTip = buildNovacionExtraPrompt();
+  if (isPropuestaPagoCP)  extraTip = buildPropuestaPagoExtraPrompt();
+  if (isAbonoCP)          extraTip = buildAbonoExtraPrompt();
 
   // ---- Instrucciones de salida (JSON) ----
   const commonJsonShape = `
@@ -291,30 +370,74 @@ Marca alertas de FRAUDE si el agente pide consignar/transferir a canal NO oficia
 {
   "agent_name": "string (si no hay evidencia, \\"\\" )",
   "client_name": "string (si no hay evidencia, \\"\\" )",
-  "resumen": "100-150 palabras (claridad de oferta, consentimiento, normas 1581/1266 si aplica, objeciones, tono)",
+  "resumen": "100-150 palabras (claridad de oferta, consentimiento, 1581/1266 si aplica, objeciones, tono)",
   "hallazgos": ["3-6 bullets operativos y específicos sobre lo que sí aparece"],
   "sugerencias_generales": ["2-4 puntos accionables de mejora"],
-  "flags": {
-    "novacion_aceptada": true,
-    "ley_1581_mencionada": true,
-    "hubo_objeciones": true,
-    "despedida_adecuada": true
-  },
-  "novacion": {
-    "aceptada": true,
-    "motivo_no_aplica": "string si aceptada=false; de lo contrario \\"\\""
-  },
+  "flags": { "novacion_aceptada": true, "ley_1581_mencionada": true, "hubo_objeciones": true, "despedida_adecuada": true },
+  "novacion": { "aceptada": true, "motivo_no_aplica": "" },
   "consolidado": {
     "notaFinal": 0,
     "porAtributo": [
       ${NOVACION_ITEMS.map(t =>
-        `{"atributo":"${t.replace(/"/g, '\\"')}","aplica":true,"cumplido":true,"justificacion":"", "mejora":""}`
+        `{"atributo":"${t.replace(/"/g, '\\"')}","aplica":true,"cumplido":true,"justificacion":"","mejora":""}`
       ).join(',\n      ')}
     ]
   },
   "fraude": {
     "alertas": [
       { "tipo": "novacion_invalida|cuenta_no_oficial|contacto_numero_no_oficial|otro", "cita": "frase breve", "riesgo": "alto|medio|bajo" }
+    ],
+    "observaciones": "string"
+  }
+}
+`.trim();
+
+  const propuestaJsonShape = `
+{
+  "agent_name": "string (si no hay evidencia, \\"\\" )",
+  "client_name": "string (si no hay evidencia, \\"\\" )",
+  "resumen": "100-150 palabras (protocolo, legalidad 1581/1266, cierre y tono)",
+  "hallazgos": ["3-6 bullets operativos y específicos sobre lo que sí aparece"],
+  "sugerencias_generales": ["2-4 puntos accionables de mejora"],
+  "flags": { "propuesta_pago_aceptada": true, "ley_1581_mencionada": true, "hubo_objeciones": true, "despedida_adecuada": true },
+  "propuesta_pago": { "aceptada": true, "motivo_no_aplica": "" },
+  "consolidado": {
+    "notaFinal": 0,
+    "porAtributo": [
+      ${PPY_ABONO_ITEMS.map(t =>
+        `{"atributo":"${t.replace(/"/g, '\\"')}","aplica":true,"cumplido":true,"justificacion":"","mejora":""}`
+      ).join(',\n      ')}
+    ]
+  },
+  "fraude": {
+    "alertas": [
+      { "tipo": "cuenta_no_oficial|contacto_numero_no_oficial|otro", "cita": "frase breve", "riesgo": "alto|medio|bajo" }
+    ],
+    "observaciones": "string"
+  }
+}
+`.trim();
+
+  const abonoJsonShape = `
+{
+  "agent_name": "string (si no hay evidencia, \\"\\" )",
+  "client_name": "string (si no hay evidencia, \\"\\" )",
+  "resumen": "100-150 palabras (protocolo, legalidad 1581/1266, cierre y tono)",
+  "hallazgos": ["3-6 bullets operativos y específicos sobre lo que sí aparece"],
+  "sugerencias_generales": ["2-4 puntos accionables de mejora"],
+  "flags": { "abono_comprometido": true, "ley_1581_mencionada": true, "hubo_objeciones": true, "despedida_adecuada": true },
+  "abono": { "aceptado": true, "motivo_no_aplica": "" },
+  "consolidado": {
+    "notaFinal": 0,
+    "porAtributo": [
+      ${PPY_ABONO_ITEMS.map(t =>
+        `{"atributo":"${t.replace(/"/g, '\\"')}","aplica":true,"cumplido":true,"justificacion":"","mejora":""}`
+      ).join(',\n      ')}
+    ]
+  },
+  "fraude": {
+    "alertas": [
+      { "tipo": "cuenta_no_oficial|contacto_numero_no_oficial|otro", "cita": "frase breve", "riesgo": "alto|medio|bajo" }
     ],
     "observaciones": "string"
   }
@@ -332,7 +455,12 @@ TRANSCRIPCIÓN:
 ${String(transcript || '').slice(0, Number(process.env.ANALYSIS_MAX_INPUT_CHARS) || 20000)}
 
 Devuelve SOLO este JSON:
-${isNovacionCP ? novacionJsonShape : commonJsonShape}
+${
+  isNovacionCP       ? novacionJsonShape   :
+  isPropuestaPagoCP  ? propuestaJsonShape  :
+  isAbonoCP          ? abonoJsonShape      :
+  commonJsonShape
+}
 `.trim();
 
   const completion = await client.chat.completions.create({
@@ -360,15 +488,17 @@ ${isNovacionCP ? novacionJsonShape : commonJsonShape}
       alertas: Array.isArray(json?.fraude?.alertas) ? json.fraude.alertas : [],
       observaciones: json?.fraude?.observaciones || ''
     },
-    // campos opcionales (cuando el prompt los incluye)
+    // bloques opcionales (según tipificación)
     novacion: json?.novacion,
+    propuesta_pago: json?.propuesta_pago,
+    abono: json?.abono,
     consolidado: json?.consolidado
   };
 
-  // ---- Post-proceso Novación: nota 100/0 y afectados críticos
-  if (isNovacionCP) {
-    analisis = ensureNovacionConsolidado(analisis);
-  }
+  // ---- Post-proceso por caso para nota 100/0 y afectados críticos
+  if (isNovacionCP)       analisis = ensureConsolidadoForType(analisis, 'novacion');
+  if (isPropuestaPagoCP)  analisis = ensureConsolidadoForType(analisis, 'propuesta_pago');
+  if (isAbonoCP)          analisis = ensureConsolidadoForType(analisis, 'abono');
 
   // Merge con heurística local anti-fraude (sin duplicar)
   const heur = detectFraudHeuristics(String(transcript || ''));

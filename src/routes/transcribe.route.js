@@ -35,19 +35,43 @@ function baseTxtName(original) {
   const safe = base.replace(/[^a-z0-9._-]+/gi, '_');
   return safe || 'audio';
 }
-function pickOptsFromBody(body) {
-  const language     = (body?.language || 'es-ES').trim();
-  const provider     = (body?.provider || '').toString().trim().toLowerCase(); // 'faster' | 'openai' | ''
-  const mode         = (body?.mode || '').toString().trim().toLowerCase();     // 'mono' | 'stereo' | ''
-  const agentChannel = Number.isFinite(Number(body?.agentChannel)) ? Number(body.agentChannel) : undefined;
 
-  const allowed = new Set(['faster', 'openai', '']);
+/**
+ * Normaliza parámetros desde el body:
+ * - Acepta alias para provider: openai | faster | deepgram (dg/deep)
+ * - Si no viene, usa TRANSCRIBE_PROVIDER del .env
+ * - Valida proveedor y devuelve language/mode/agentChannel/model/mimetype
+ */
+function pickOptsFromBody(body = {}) {
+  const language = String(body?.language || 'es-ES').trim();
+
+  const raw = String(body?.provider || body?.stt || '').trim().toLowerCase();
+  const envRaw = String(process.env.TRANSCRIBE_PROVIDER || '').trim().toLowerCase();
+
+  const map = {
+    'openai': 'openai',
+    'faster': 'faster',
+    'fw': 'faster',
+    'local': 'faster',
+    'deepgram': 'deepgram',
+    'dg': 'deepgram',
+    'deep': 'deepgram'
+  };
+  const provider = map[raw] || map[envRaw] || 'openai';
+
+  const allowed = new Set(['openai', 'faster', 'deepgram']);
   if (!allowed.has(provider)) {
-    const err = new Error(`provider inválido: "${provider}". Usa "faster" u "openai".`);
+    const err = new Error(`provider inválido: "${raw}". Usa "faster", "openai" o "deepgram".`);
     err.status = 400;
     throw err;
   }
-  return { language, provider, mode, agentChannel };
+
+  const mode         = String(body?.mode || '').trim().toLowerCase(); // 'mono' | 'stereo' | ''
+  const agentChannel = Number.isFinite(Number(body?.agentChannel)) ? Number(body.agentChannel) : undefined;
+  const model        = body?.model ? String(body.model) : undefined;
+  const mimetype     = body?.mimetype ? String(body.mimetype) : undefined;
+
+  return { language, provider, mode, agentChannel, model, mimetype };
 }
 
 // ---------- (1) Compat: JSON para análisis (tu endpoint actual) ----------
@@ -55,16 +79,21 @@ router.post('/transcribe', upload.single('audio'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ ok: false, error: 'Adjunta el archivo en el campo "audio"' });
 
-    const { language, provider, mode, agentChannel } = pickOptsFromBody(req.body);
+    const { language, provider, mode, agentChannel, model, mimetype } = pickOptsFromBody(req.body);
 
     const transcript = await transcribeAudio(
       req.file.buffer,
       req.file.originalname,
       language,
-      { provider, mode, agentChannel }
+      { provider, mode, agentChannel, model, mimetype }
     );
 
-    res.json({ ok: true, transcript: toPlainTranscript(transcript), language, provider: provider || '(default .env)' });
+    res.json({
+      ok: true,
+      transcript: toPlainTranscript(transcript),
+      language,
+      provider: provider || '(default .env)'
+    });
   } catch (err) {
     console.error('[TRANSCRIBE JSON][ERROR]', err);
     res.status(err.status || 500).json({ ok: false, error: err?.message || String(err) });
@@ -76,13 +105,13 @@ router.post('/transcribe-txt', upload.single('audio'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).send('Adjunta el archivo en el campo "audio"');
 
-    const { language, provider, mode, agentChannel } = pickOptsFromBody(req.body);
+    const { language, provider, mode, agentChannel, model, mimetype } = pickOptsFromBody(req.body);
 
     const transcript = await transcribeAudio(
       req.file.buffer,
       req.file.originalname,
       language,
-      { provider, mode, agentChannel }
+      { provider, mode, agentChannel, model, mimetype }
     );
 
     const text = toPlainTranscript(transcript);
@@ -103,7 +132,7 @@ router.post('/transcribe-zip', upload.array('audios', Number(process.env.BATCH_M
     const files = req.files || [];
     if (!files.length) return res.status(400).send('Adjunta archivos en el campo "audios"');
 
-    const { language, provider, mode, agentChannel } = pickOptsFromBody(req.body);
+    const { language, provider, mode, agentChannel, model, mimetype } = pickOptsFromBody(req.body);
 
     // ZIP streaming (no guarda en disco)
     res.setHeader('Content-Type', 'application/zip');
@@ -121,7 +150,7 @@ router.post('/transcribe-zip', upload.array('audios', Number(process.env.BATCH_M
           f.buffer,
           f.originalname,
           language,
-          { provider, mode, agentChannel }
+          { provider, mode, agentChannel, model, mimetype }
         );
         const text = toPlainTranscript(transcript);
         const name = baseTxtName(f.originalname) + '.txt';
@@ -136,7 +165,6 @@ router.post('/transcribe-zip', upload.array('audios', Number(process.env.BATCH_M
     await archive.finalize();
   } catch (err) {
     console.error('[TRANSCRIBE ZIP][ERROR]', err);
-    // Si aún no hemos enviado headers, devolvemos error normal.
     if (!res.headersSent) res.status(err.status || 500).send(err?.message || String(err));
   }
 });
