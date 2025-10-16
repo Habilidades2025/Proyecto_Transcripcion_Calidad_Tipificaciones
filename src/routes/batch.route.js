@@ -8,9 +8,12 @@ const multer = (multerPkg.default ?? multerPkg);
 import fs from 'fs';
 import path from 'path';
 
-import { transcribeAudio, formatTranscriptLinesMono } from '../services/transcriptionService.js';
+import { transcribeAudio } from '../services/transcriptionService.js';
 import { analyzeTranscriptSimple } from '../services/analysisService.js';
 import { saveAudit } from '../services/persistService.js';
+
+/* --------------------------- Helpers de log --------------------------- */
+const log = (...a) => console.log('[batch]', ...a);
 
 /* --------------------------- Config Upload --------------------------- */
 const upload = multer({
@@ -38,7 +41,8 @@ async function mapWithConcurrency(items, concurrency, worker) {
       while (active < concurrency && idx < items.length) {
         const myIndex = idx++;
         active++;
-        Promise.resolve(worker(items[myIndex], myIndex))
+        Promise
+          .resolve(worker(items[myIndex], myIndex))
           .then(res => { results[myIndex] = res; })
           .catch(err => { results[myIndex] = { ok:false, error:String(err?.message||err) }; })
           .finally(() => {
@@ -143,9 +147,11 @@ async function handleDirect(req, res) {
       f.mimetype?.startsWith('audio/') ||
       AUDIO_RE.test(f.originalname || '')
     );
+    const provider      = s(req.body.provider || process.env.STT_PROVIDER || 'openai');
+    log('direct called url=%s files=%d provider=%s', req.originalUrl, files.length, provider);
+
     if (!files.length) return res.status(400).json({ error: 'Adjunta uno o más audios (campo "audios").' });
 
-    const provider      = s(req.body.provider || process.env.STT_PROVIDER || 'openai');
     const campania      = s(req.body.campania || req.body['campaña'] || 'Carteras Propias');
     const tipificacion  = s(req.body.tipificacion || '');
     const tipiMap       = jsonParseSafe(req.body.tipificacion_map, null);
@@ -160,8 +166,11 @@ async function handleDirect(req, res) {
       try {
         // a) Transcribir
         const tr = await transcribeAudio(file.buffer, { provider });
-        let transcriptMarked = formatTranscriptLinesMono(tr?.segments || tr?.lines || tr?.text || '');
-        if (Array.isArray(transcriptMarked)) transcriptMarked = transcriptMarked.join('\n');
+
+        // Preferimos líneas marcadas si existen; si no, caemos al texto plano
+        let transcriptMarked = '';
+        const marked = Array.isArray(tr?.linesRoleLabeled) ? tr.linesRoleLabeled : [];
+        transcriptMarked = marked.length ? marked.join('\n') : (tr?.text || '').trim();
 
         // b) Tipificación efectiva
         const tipi = (tipiMap?.[name] ? s(tipiMap[name]) : tipificacion) || '';
@@ -169,19 +178,16 @@ async function handleDirect(req, res) {
         // c) Analizar
         const analisis = await analyzeTranscriptSimple({ transcript: transcriptMarked, campania, tipificacion: tipi, tipi_prompt: tipiPromptUI });
 
-        // d) Consolidado (usar el que viene del modelo; fallback si no viene)
+        // d) Consolidado
         const consolidadoFromModel = (analisis && typeof analisis.consolidado === 'object') ? analisis.consolidado : null;
         let nota = (consolidadoFromModel && Number.isFinite(Number(consolidadoFromModel.notaFinal)))
           ? Math.round(Number(consolidadoFromModel.notaFinal))
           : null;
-
         if (nota === null) {
-          // fallback legacy por si algún prompt viejo
           nota =
             Number(analisis?.notaFinal) || Number(analisis?.nota) ||
             Number(analisis?.score)     || Number(analisis?.scoring) || null;
         }
-
         const consolidado = consolidadoFromModel ?? (Number.isFinite(nota) ? { notaFinal: Math.round(nota) } : undefined);
 
         // e) Persistencia individual
@@ -193,13 +199,14 @@ async function handleDirect(req, res) {
           provider, campania, tipificacion: tipi
         };
 
-        await saveAudit({
+        const savedPath = await saveAudit({
           metadata,
           analisis,
           consolidado,
           transcript: transcriptMarked,
           transcriptMarked
         });
+        log('saved audit %s', savedPath);
 
         return {
           ok: true,
@@ -264,6 +271,7 @@ function newJob(files, meta = {}) {
     started: nowMs()
   };
   jobs.set(id, job);
+  log('job created id=%s files=%d meta=%j', id, files.length, meta);
   return job;
 }
 function notifyJob(job) {
@@ -276,11 +284,10 @@ function notifyJob(job) {
   for (const res of job.listeners) { try { sseSend(res, 'progress', payload); } catch {} }
 }
 
-// Nuevo: resumen grupal con promedio, críticos y plan de mejora
+/* ---------------- Resumen grupal (promedio, críticos, plan) ----------- */
 function buildGroupSummary(results) {
   const oks = results.filter(r => r?.ok && r.meta?.analisis);
 
-  // Hallazgos más comunes
   const hallCount = new Map();
   oks.forEach(r => (r.meta.analisis.hallazgos || [])
     .forEach(h => hallCount.set(h, (hallCount.get(h) || 0) + 1)));
@@ -289,13 +296,11 @@ function buildGroupSummary(results) {
     .slice(0,5)
     .map(([h,c])=>`${h} (${c})`);
 
-  // Promedio de nota (usa consolidado.notaFinal)
   const notas = oks
     .map(r => Number(r.meta?.consolidado?.notaFinal))
     .filter(n => Number.isFinite(n));
   const promedio = notas.length ? Math.round(notas.reduce((a,b)=>a+b,0) / notas.length) : 0;
 
-  // Ítems críticos afectados y plan de mejora
   const criticos = new Set();
   const mejoras = [];
   oks.forEach(r => {
@@ -327,13 +332,18 @@ async function handleStart(req, res) {
       f.mimetype?.startsWith('audio/') ||
       AUDIO_RE.test(f.originalname || '')
     );
-    if (!files.length) return res.status(400).json({ error: 'Adjunta uno o más audios (campo "audios").' });
 
     const provider      = s(req.body.provider || process.env.STT_PROVIDER || 'openai');
     const campania      = s(req.body.campania || req.body['campaña'] || 'Carteras Propias');
     const tipificacion  = s(req.body.tipificacion || '');
     const tipiMap       = jsonParseSafe(req.body.tipificacion_map, null);
     const tipiPromptUI  = s(req.body.tipi_prompt || '');
+
+    log('start called url=%s files=%d provider=%s', req.originalUrl, files.length, provider);
+
+    if (!files.length) {
+      return res.status(400).json({ error: 'Adjunta uno o más audios (campo "audios").' });
+    }
 
     const job = newJob(files, { provider, campania, tipificacionDefault: tipificacion });
     res.json({ jobId: job.id }); // UI espera respuesta inmediata
@@ -352,18 +362,18 @@ async function handleStart(req, res) {
       let ok = false, meta = null, errMsg = '';
       try {
         const tr = await transcribeAudio(file.buffer, { provider });
-        let transcriptMarked = formatTranscriptLinesMono(tr?.segments || tr?.lines || tr?.text || '');
-        if (Array.isArray(transcriptMarked)) transcriptMarked = transcriptMarked.join('\n');
+
+        let transcriptMarked = '';
+        const marked = Array.isArray(tr?.linesRoleLabeled) ? tr.linesRoleLabeled : [];
+        transcriptMarked = marked.length ? marked.join('\n') : (tr?.text || '').trim();
 
         const tipi = (tipiMap?.[name] ? s(tipiMap[name]) : tipificacion) || '';
         const analisis = await analyzeTranscriptSimple({ transcript: transcriptMarked, campania, tipificacion: tipi, tipi_prompt: tipiPromptUI });
 
-        // Consolidado y nota
         const consolidadoFromModel = (analisis && typeof analisis.consolidado === 'object') ? analisis.consolidado : null;
         let nota = (consolidadoFromModel && Number.isFinite(Number(consolidadoFromModel.notaFinal)))
           ? Math.round(Number(consolidadoFromModel.notaFinal))
           : null;
-
         if (nota === null) {
           nota =
             Number(analisis?.notaFinal) || Number(analisis?.nota) ||
@@ -379,14 +389,14 @@ async function handleStart(req, res) {
           provider, campania, tipificacion: tipi
         };
 
-        // persistencia individual
-        await saveAudit({
+        const savedPath = await saveAudit({
           metadata,
           analisis,
           consolidado,
           transcript: transcriptMarked,
           transcriptMarked
         });
+        log('saved audit %s', savedPath);
 
         ok = true;
         meta = {
@@ -414,9 +424,9 @@ async function handleStart(req, res) {
 
     job.group = buildGroupSummary(job.results);
     job.status = 'done';
-    // artefactos del lote
     writeBatchArtifacts(job, job.results);
     notifyJob(job);
+    log('job finished id=%s done=%d/%d', job.id, job.done, job.total);
   } catch (err) {
     console.error('[batch/start] error:', err);
     try { res.status(500).json({ error: String(err?.message || err) }); } catch {}
@@ -424,26 +434,45 @@ async function handleStart(req, res) {
 }
 
 /* ------------------------------- Rutas JOB ------------------------------- */
+// Importante: si montas este router con app.use('/batch', router),
+// la ruta efectiva es /batch/start , /batch/progress/:id , /batch/result/:id
 router.post('/start', upload.any(), handleStart);
-router.post('/batch/start', upload.any(), handleStart); // alias por compatibilidad
+// (Evita duplicar prefijo con alias /batch/batch/*)
+// router.post('/batch/start', upload.any(), handleStart);
 
 /* ------------------------------ Progreso (SSE) --------------------------- */
 function progressHandler(req, res) {
   const id = s(req.params.id || '');
+  if (!id) return res.status(400).json({ error: 'Falta jobId' });
+
   const job = jobs.get(id);
+  log('progress open id=%s found=%s', id, !!job);
+
   if (!job) return res.status(404).json({ error: 'Job no encontrado' });
+
   initSSE(res);
   job.listeners.push(res);
   notifyJob(job);
-  req.on('close', () => { job.listeners = job.listeners.filter(r => r !== res); });
+
+  // keepalive para proxies intermedios
+  const keepalive = setInterval(() => {
+    try { res.write(': keepalive\n\n'); } catch {}
+  }, Number(process.env.SSE_KEEPALIVE_MS || 15000));
+
+  req.on('close', () => {
+    clearInterval(keepalive);
+    job.listeners = job.listeners.filter(r => r !== res);
+    log('progress closed id=%s', id);
+  });
 }
 router.get('/progress/:id', progressHandler);
-router.get('/batch/progress/:id', progressHandler);
+// router.get('/batch/progress/:id', progressHandler); // alias opcional
 
 /* -------------------------------- Resultado ------------------------------ */
 function resultHandler(req, res) {
   const id = s(req.params.id || '');
   const job = jobs.get(id);
+  log('result requested id=%s found=%s', id, !!job);
   if (!job) return res.status(404).json({ error: 'Job no encontrado' });
 
   const items = job.results.map((r, i) => {
@@ -455,7 +484,7 @@ function resultHandler(req, res) {
         meta: {
           analisis: r.meta?.analisis || {},
           nota: r.meta?.nota,
-          consolidado: r.meta?.consolidado, // incluye porAtributo
+          consolidado: r.meta?.consolidado,
           transcriptMarked: r.meta?.transcriptMarked || '',
           durationMs: r.meta?.durationMs ?? 0
         }
@@ -467,6 +496,6 @@ function resultHandler(req, res) {
   res.json({ items, group: job.group || { total: items.length } });
 }
 router.get('/result/:id', resultHandler);
-router.get('/batch/result/:id', resultHandler);
+// router.get('/batch/result/:id', resultHandler); // alias opcional
 
 export default router;

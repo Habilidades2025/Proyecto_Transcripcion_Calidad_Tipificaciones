@@ -89,15 +89,15 @@ function scoreRoleHints(text = '') {
   if (/(llamada\s+est[aá]\s+siendo\s+grabada|monitoread[ao]|calidad|ley\s+1581|protecci[oó]n\s+de\s+datos)/.test(t)) agent += 3;
   if (/(ofrezc|ofrecer|brindo|le\s+ofrezco|alternativas|descuento|cuotas|plan\s+de\s+pagos)/.test(t)) agent += 2;
   if (/(novarte[ck]|contacto\s+solutions|vartex|novartec)/.test(t)) agent += 2;
-  if (/(link\s+de\s+pago|pse|portal\s+oficial|oficinas\s+autorizadas)/.test(t)) agent += 2;
-  if (/^buen[oa]s\s+(tardes|d[ií]as|noches)[,;\s]/.test(t) && /(le\s+habla|de\\s+contacto|del\\s+área|somos)/.test(t)) agent += 2;
+  if (/(link\s+de\s+pago|pse|portal\\s+oficial|oficinas\\s+autorizadas)/.test(t)) agent += 2;
+  if (/^buen[oa]s\s+(tardes|d[ií]as|noches)[,;\s]/.test(t) && /(le\\s+habla|de\\s+contacto|del\\s+área|somos)/.test(t)) agent += 2;
 
-  if (/(no\s+tengo|no\s+puedo|no\s+estoy\s+trabajando|estoy\s+desemplead[oa]|independiente|no\s+me\s+queda|no\s+me\s+alcanza)/.test(t)) client += 2;
-  if (/(mi\s+prima|mi\s+familia|yo\s+puedo|yo\s+pag[oé]|no\s+entiendo|c[oó]mo\s+hago)/.test(t)) client += 1;
+  if (/(no\\s+tengo|no\\s+puedo|no\\s+estoy\\s+trabajando|estoy\\s+desemplead[oa]|independiente|no\\s+me\\s+queda|no\\s+me\\s+alcanza)/.test(t)) client += 2;
+  if (/(mi\\s+prima|mi\\s+familia|yo\\s+puedo|yo\\s+pag[oé]|no\\s+entiendo|c[oó]mo\\s+hago)/.test(t)) client += 1;
   if (/^(sí|si|no|ok|bueno|claro|listo|perfecto)[,.\s]*$/.test(t)) client += 2;
   if (/gracias/.test(t)) client += 1;
   if (/^\$?\s*\d+([.,]\d+)?(\s*(mil|k|m|millones?))?$/.test(t)) client += 2;
-  if (/^(emplead[oa]|independiente|pensionad[oa]|no\s+trabajo|buscando\s+empleo)\.?$/.test(t)) client += 2;
+  if (/^(emplead[oa]|independiente|pensionad[oa]|no\\s+trabajo|buscando\\s+empleo)\\.?$/.test(t)) client += 2;
 
   return { agent, client };
 }
@@ -285,6 +285,8 @@ export async function transcribeAudio(buffer, a1, a2, a3) {
   const { filename, language, opts } = normalizeArgs(buffer, a1, a2, a3);
   const provider = resolveProvider(opts?.provider);
 
+  console.log('[STT] provider=%s language=%s', provider, language);
+
   if (provider === 'openai') {
     if (!process.env.OPENAI_API_KEY) {
       throw new Error('OPENAI_API_KEY no configurada; no puedo usar OpenAI.');
@@ -296,13 +298,15 @@ export async function transcribeAudio(buffer, a1, a2, a3) {
     if (!process.env.DEEPGRAM_API_KEY) {
       throw new Error('DEEPGRAM_API_KEY no configurada; no puedo usar Deepgram.');
     }
-    return transcribeAudioDeepgram(
-      buffer,
-      filename,
-      language,
-      opts?.mimetype || guessMimeFromName(filename),
-      opts?.model || process.env.DEEPGRAM_MODEL
-    );
+    const out = await transcribeAudioDeepgram(buffer, filename, language);
+    // Salvavidas: si Deepgram no devuelve nada y tienes activado fallback:
+    if (!out.text && (!Array.isArray(out.segments) || out.segments.length === 0)) {
+      if (String(process.env.DEEPGRAM_FALLBACK_OPENAI || '0') === '1') {
+        console.warn('[STT][Deepgram] vacío → fallback a OpenAI (whisper)');
+        try { return await transcribeAudioOpenAI(buffer, filename, language); } catch {}
+      }
+    }
+    return out;
   }
 
   // provider === 'faster' (Faster-Whisper local)
@@ -322,6 +326,8 @@ async function transcribeAudioOpenAI(buffer, filename, language) {
 
   const model = process.env.OPENAI_TRANSCRIPTION_MODEL || 'whisper-1';
   const lang  = (language || 'es-ES').split('-')[0];
+
+  console.log('[STT][OpenAI] model=%s lang=%s bytes=%d', model, lang, buffer?.length || 0);
 
   const resp = await client.audio.transcriptions.create({
     file,
@@ -343,89 +349,229 @@ async function transcribeAudioOpenAI(buffer, filename, language) {
   return { text, segments, linesRoleLabeled };
 }
 
-/* ========================== Deepgram (HTTP /listen) ========================== */
+/* ========================== Deepgram (SDK + HTTP fallback) ========================== */
 function guessMimeFromName(name = '') {
-  const n = String(name || '').toLowerCase();
-  if (n.endsWith('.wav'))  return 'audio/wav';
-  if (n.endsWith('.mp3'))  return 'audio/mpeg';
-  if (n.endsWith('.m4a'))  return 'audio/m4a';
-  if (n.endsWith('.aac'))  return 'audio/aac';
-  if (n.endsWith('.ogg'))  return 'audio/ogg';
-  if (n.endsWith('.webm')) return 'audio/webm';
-  if (n.endsWith('.flac')) return 'audio/flac';
-  return 'application/octet-stream';
+  const ext = String(name || '').toLowerCase().split('.').pop();
+  switch (ext) {
+    case 'mp3':  return 'audio/mpeg';
+    case 'wav':  return 'audio/wav';
+    case 'm4a':  return 'audio/mp4';   // m4a suele servirse como audio/mp4
+    case 'aac':  return 'audio/aac';
+    case 'ogg':  return 'audio/ogg';
+    case 'oga':  return 'audio/ogg';
+    case 'opus': return 'audio/opus';
+    case 'webm': return 'audio/webm';
+    case 'flac': return 'audio/flac';
+    default:     return 'application/octet-stream';
+  }
 }
 
-async function transcribeAudioDeepgram(buffer, filename, language, mimetype, model) {
-  const key = process.env.DEEPGRAM_API_KEY;
-  const base = 'https://api.deepgram.com/v1/listen';
-  const lang = (language || 'es-ES').split('-')[0] || 'es';
+async function transcribeAudioDeepgram(buffer, filename, language) {
+  const { createClient } = await import('@deepgram/sdk'); // import dinámico
+  const dg = createClient(process.env.DEEPGRAM_API_KEY);
 
-  const url = new URL(base);
-  url.searchParams.set('smart_format', 'true');
-  url.searchParams.set('punctuate', 'true');
-  url.searchParams.set('utterances', 'true');     // para segmentos con tiempos
-  url.searchParams.set('model', model || 'nova-2');
-  url.searchParams.set('language', lang);
+  const model = process.env.DEEPGRAM_STT_MODEL || 'nova-3';
+  const lang  = (language || 'es-ES').split('-')[0];
 
-  const resp = await fetch(url.toString(), {
-    method: 'POST',
-    headers: {
-      'Authorization': `Token ${key}`,
-      'Content-Type': mimetype || 'audio/mpeg',
-      'Accept': 'application/json'
-    },
-    body: Buffer.from(buffer)
-  });
+  let source = {
+    buffer: Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer),
+    mimetype: guessMimeFromName(filename)
+  };
 
-  if (!resp.ok) {
-    const t = await resp.text().catch(() => '');
-    throw new Error(`Deepgram error ${resp.status}: ${t.slice(0, 300)}`);
-  }
+  const opts = {
+    model,
+    language: lang,
+    smart_format: true,
+    punctuate: true,
+    utterances: true,
+    paragraphs: true
+  };
 
-  const j = await resp.json().catch(() => ({}));
+  const doSDK = async () => {
+    console.log('[STT][Deepgram] bytes=%d mime=%s model=%s lang=%s',
+      source.buffer?.length || 0, source.mimetype, opts.model, opts.language);
 
-  const text = String(
-    j?.results?.channels?.[0]?.alternatives?.[0]?.transcript || ''
-  ).trim();
+    const resp   = await dg.listen.prerecorded.transcribeFile(source, opts);
+    const result = resp?.result || {};
+    const ch0    = result?.results?.channels?.[0] || {};
+    const alt0   = ch0?.alternatives?.[0] || {};
 
-  let segments = [];
-  // 1) Mejor opción: utterances (con start/end)
-  if (Array.isArray(j?.results?.utterances) && j.results.utterances.length) {
-    segments = j.results.utterances.map(u => ({
-      start: Number(u?.start ?? 0),
-      end:   Number(u?.end ?? ((u?.start ?? 0) + 2)),
-      text:  String(u?.transcript || '')
-    }));
-  } else {
-    // 2) Fallback: agrupar por palabras con gap
-    const words = j?.results?.channels?.[0]?.alternatives?.[0]?.words || [];
-    const GAP = 0.8;     // segundos
-    const MAX_DUR = 8;   // segundos
-    let cur = null;
-    for (const w of words) {
-      const wstart = Number(w?.start ?? w?.start_time ?? 0);
-      const wend   = Number(w?.end   ?? w?.end_time   ?? (wstart + 0.2));
-      const wtext  = String(w?.punctuated_word || w?.word || '').trim();
-      if (!wtext) continue;
+    // ----------- TEXT robusto -----------
+    let text = '';
 
-      if (!cur) { cur = { start: wstart, end: wend, text: wtext }; continue; }
-      const gap = Math.max(0, wstart - cur.end);
-      const dur = Math.max(0, cur.end - cur.start);
+    // 1) transcript completo si viene
+    if (!text && typeof alt0?.transcript === 'string') {
+      text = alt0.transcript.trim();
+      if (text && text !== '(no speech)') console.log('[STT][Deepgram] texto desde alt0.transcript');
+    }
 
-      if (gap > GAP || dur > MAX_DUR) {
-        segments.push(cur);
-        cur = { start: wstart, end: wend, text: wtext };
-      } else {
-        cur.text = `${cur.text} ${wtext}`.replace(/\s+/g, ' ').trim();
-        cur.end = wend;
+    // 2) paragraphs.transcript (si lo trae)
+    if (!text && alt0?.paragraphs?.transcript) {
+      text = String(alt0.paragraphs.transcript).trim();
+      if (text) console.log('[STT][Deepgram] texto desde paragraphs.transcript');
+    }
+
+    // 3) paragraphs.paragraphs[*].text/sentences
+    if (!text && Array.isArray(alt0?.paragraphs?.paragraphs)) {
+      text = alt0.paragraphs.paragraphs
+        .map(p => (Array.isArray(p?.sentences)
+          ? p.sentences.map(s => s.text || '').join(' ')
+          : (p?.text || '')))
+        .join(' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (text) console.log('[STT][Deepgram] texto desde paragraphs.paragraphs[*]');
+    }
+
+    // 4) utterances
+    const utterances = Array.isArray(result?.results?.utterances) ? result.results.utterances : [];
+    if (!text && utterances.length) {
+      text = utterances.map(u => String(u?.transcript || ''))
+        .join(' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (text) console.log('[STT][Deepgram] texto desde utterances');
+    }
+
+    // 5) words
+    if (!text && Array.isArray(alt0?.words) && alt0.words.length) {
+      text = alt0.words
+        .map(w => w?.punctuated_word || w?.word || '')
+        .join(' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (text) console.log('[STT][Deepgram] texto desde words');
+    }
+
+    // ----------- SEGMENTOS -----------
+    let segments = [];
+    if (utterances.length) {
+      segments = utterances.map(u => ({
+        start: Number(u?.start ?? 0),
+        end:   Number(u?.end ?? ((u?.start ?? 0) + 2)),
+        text:  String(u?.transcript || '').trim()
+      })).filter(s => s.text);
+    } else if (Array.isArray(alt0?.words) && alt0.words.length) {
+      const words = alt0.words;
+      const GAP = 0.8;   // segundos
+      const MAX = 8;     // segundos
+      let cur = null;
+      for (const w of words) {
+        const wstart = Number(w?.start ?? w?.start_time ?? 0);
+        const wend   = Number(w?.end   ?? w?.end_time   ?? (wstart + 0.2));
+        const wtext  = String(w?.punctuated_word || w?.word || '').trim();
+        if (!wtext) continue;
+
+        if (!cur) { cur = { start: wstart, end: wend, text: wtext }; continue; }
+        const gap = Math.max(0, wstart - cur.end);
+        const dur = Math.max(0, cur.end - cur.start);
+
+        if (gap > GAP || dur > MAX) {
+          segments.push(cur);
+          cur = { start: wstart, end: wend, text: wtext };
+        } else {
+          cur.text = `${cur.text} ${wtext}`.replace(/\s+/g, ' ').trim();
+          cur.end = wend;
+        }
+      }
+      if (cur) segments.push(cur);
+    }
+
+    // Derivar texto desde segmentos si aún está vacío
+    if (!text && segments.length) {
+      text = segments.map(s => s.text).join(' ').replace(/\s+/g, ' ').trim();
+      if (text) console.log('[STT][Deepgram] texto derivado de segmentos');
+    }
+
+    console.log('[STT][Deepgram] text.len=%d segments=%d', text.length, segments.length);
+    const linesRoleLabeled = formatTranscriptLinesMono(segments);
+    return { text, segments, linesRoleLabeled };
+  };
+
+  const doHTTPFallback = async () => {
+    const base = 'https://api.deepgram.com/v1/listen';
+    const url = new URL(base);
+    url.searchParams.set('smart_format', 'true');
+    url.searchParams.set('punctuate', 'true');
+    url.searchParams.set('utterances', 'true');
+    url.searchParams.set('paragraphs', 'true');
+    url.searchParams.set('model', model);
+    url.searchParams.set('language', lang);
+
+    const resp = await fetch(url.toString(), {
+      method: 'POST',
+      headers: {
+        'Authorization': `Token ${process.env.DEEPGRAM_API_KEY}`,
+        'Content-Type': source.mimetype || 'application/octet-stream',
+        'Accept': 'application/json'
+      },
+      body: Buffer.from(source.buffer)
+    });
+
+    if (!resp.ok) {
+      const t = await resp.text().catch(() => '');
+      throw new Error(`Deepgram HTTP error ${resp.status}: ${t.slice(0, 300)}`);
+    }
+
+    const j = await resp.json().catch(() => ({}));
+
+    let text = '';
+    const ch0  = j?.results?.channels?.[0] || {};
+    const alt0 = ch0?.alternatives?.[0] || {};
+    if (typeof alt0?.transcript === 'string') text = alt0.transcript.trim();
+    if (!text && alt0?.paragraphs?.transcript) text = String(alt0.paragraphs.transcript).trim();
+    if (!text && Array.isArray(j?.results?.utterances)) {
+      text = j.results.utterances.map(u => u?.transcript || '').join(' ').replace(/\s+/g, ' ').trim();
+    }
+    if (!text && Array.isArray(alt0?.words)) {
+      text = alt0.words.map(w => w?.punctuated_word || w?.word || '').join(' ').replace(/\s+/g, ' ').trim();
+    }
+
+    let segments = [];
+    if (Array.isArray(j?.results?.utterances) && j.results.utterances.length) {
+      segments = j.results.utterances.map(u => ({
+        start: Number(u?.start ?? 0),
+        end:   Number(u?.end ?? (u?.start ?? 0) + 2),
+        text:  String(u?.transcript || '').trim()
+      })).filter(s => s.text);
+    }
+
+    if (!text && segments.length) {
+      text = segments.map(s => s.text).join(' ').replace(/\s+/g, ' ').trim();
+    }
+
+    console.log('[STT][Deepgram][HTTP] text.len=%d segments=%d', text.length, segments.length);
+    const linesRoleLabeled = formatTranscriptLinesMono(segments);
+    return { text, segments, linesRoleLabeled };
+  };
+
+  try {
+    const out = await doSDK();
+    if (out.text || (out.segments && out.segments.length)) return out;
+
+    console.warn('[STT][Deepgram] SDK vacío → intento HTTP fallback /v1/listen');
+    // Reintento: a veces 422 por mime; probamos octet-stream también
+    if (source.mimetype !== 'application/octet-stream') {
+      source = { buffer: Buffer.from(source.buffer), mimetype: 'application/octet-stream' };
+    }
+    return await doHTTPFallback();
+  } catch (err) {
+    const code = err?.status || err?.response?.status;
+    const msg  = err?.message || String(err);
+    console.error('[STT][Deepgram][ERROR] code=%s msg=%s', code, msg);
+
+    // 422: “Unable to read the entire client request.” → fallback HTTP
+    if (code === 422) {
+      try {
+        console.warn('[STT][Deepgram] 422 → intento HTTP fallback /v1/listen con octet-stream');
+        return await doHTTPFallback();
+      } catch (e2) {
+        console.error('[STT][Deepgram][HTTP Fallback][ERROR]', e2?.message || e2);
       }
     }
-    if (cur) segments.push(cur);
-  }
 
-  const linesRoleLabeled = formatTranscriptLinesMono(segments);
-  return { text, segments, linesRoleLabeled };
+    throw err;
+  }
 }
 
 /* ===================== Faster-Whisper local (fw-server) ===================== */

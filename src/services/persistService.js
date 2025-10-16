@@ -15,6 +15,7 @@ const REPORTS_BATCH_DIR   = path.join(REPORTS_DIR, 'batches');        // reporte
 
 ensureDir(ROOT);
 ensureDir(AUDITS_DIR);
+ensureDir(TRANS_DIR);        // asegurar carpeta de transcripciones
 ensureDir(BATCH_META_DIR);
 ensureDir(REPORTS_DIR);
 ensureDir(REPORTS_BATCH_DIR);
@@ -29,14 +30,32 @@ function readJsonSafe(p, fallback = null) { try { return JSON.parse(fs.readFileS
 function writeJsonPretty(p, obj) { fs.writeFileSync(p, JSON.stringify(obj, null, 2), 'utf-8'); }
 function toNum(x) { const n = Number(x); return Number.isFinite(n) ? n : 0; }
 function pad2(n) { return String(n).padStart(2, '0'); }
+function safeName(s='') { return String(s || '').trim().replace(/[^a-z0-9._-]+/gi, '_'); }
 
-// ---------- Guardar auditoría (sharding + externalización opcional de transcript) ----------
+// ---------- Guardar auditoría (sharding + transcript .txt garantizado) ----------
 export function saveAudit(audit = {}) {
+  // Log de configuración efectiva
+  console.log(
+    '[persist] INLINE=%s FORCE=%s BY_DAY=%s',
+    process.env.STORE_TRANSCRIPT_INLINE,
+    process.env.STORE_TRANSCRIPT_FORCE_FILE,
+    process.env.STORE_TRANSCRIPT_BY_DAY
+  );
+
   const ts = audit?.metadata?.timestamp ?? Date.now();
-  const callId = String(audit?.metadata?.callId || ts);
-  const d = new Date(ts);
+  const d  = new Date(ts);
   const yyyy = d.getFullYear();
   const mm   = pad2(d.getMonth() + 1);
+  const dd   = pad2(d.getDate());
+
+  // ID base: callId > originalFile (sin extensión) > timestamp
+  const origFile = String(audit?.metadata?.originalFile || '').trim();
+  const origBase = origFile ? safeName(path.basename(origFile, path.extname(origFile))) : '';
+  const callIdRaw =
+    String(audit?.metadata?.callId || '').trim() ||
+    origBase ||
+    String(ts);
+  const callId = safeName(callIdRaw);
 
   const shardDir = path.join(AUDITS_DIR, String(yyyy), String(mm));
   ensureDir(shardDir);
@@ -45,25 +64,53 @@ export function saveAudit(audit = {}) {
   const agentFromAnalysis  = audit?.analisis?.agent_name  || '';
   const clientFromAnalysis = audit?.analisis?.client_name || '';
 
-  // (Opcional) mover transcripción a archivo de texto
-  const externalTrans = (process.env.STORE_TRANSCRIPT_INLINE || '1') !== '1';
-  let transcriptPath = null;
-  let transcript = audit.transcript;
+  // Recopilar todas las variantes de transcripción
+  const marked   = String(audit?.transcriptMarked || '').trim();
+  const plain    = String(toPlainTranscript(audit?.transcript || '')).trim();
+  const raw      = String(toPlainTranscript(audit?.rawTranscript || '')).trim();
 
-  if (externalTrans && transcript) {
-    const tDir = path.join(TRANS_DIR, String(yyyy), String(mm));
-    ensureDir(tDir);
+  // Elegimos el MEJOR texto para archivo: el más largo de [marked, plain, raw]
+  const pickForFile = [marked, plain, raw].sort((a, b) => (b?.length || 0) - (a?.length || 0))[0] || '';
+  // Elegimos el inline (si aplica): preferir marcado; si no, plain; si no, raw
+  const pickInline  = marked || plain || raw || '';
+
+  // Políticas de guardado
+  const FORCE_FILE = (process.env.STORE_TRANSCRIPT_FORCE_FILE || '0') === '1';
+  // inline==1 → mantener en JSON; de lo contrario escribir a archivo y remover del JSON
+  let externalTrans = (process.env.STORE_TRANSCRIPT_INLINE || '1') !== '1';
+  if (FORCE_FILE) externalTrans = true;
+
+  const BY_DAY = (process.env.STORE_TRANSCRIPT_BY_DAY || '0') === '1';
+
+  // Directorio para transcripciones
+  const tDir = path.join(TRANS_DIR, String(yyyy), String(mm), ...(BY_DAY ? [String(dd)] : []));
+  ensureDir(tDir);
+
+  // Escribir .txt si corresponde y hay algo que escribir
+  let transcriptPath = null;
+  if (externalTrans && pickForFile) {
     transcriptPath = path.join(tDir, `${callId}.txt`);
-    const text = toPlainTranscript(transcript);
-    fs.writeFileSync(transcriptPath, text, 'utf-8');
-    transcript = undefined; // aligerar JSON
+    try {
+      fs.writeFileSync(transcriptPath, pickForFile, 'utf-8');
+      console.log('[persist] transcript -> %s len=%d', transcriptPath, pickForFile.length);
+    } catch (e) {
+      console.error('[persist] ERROR writing transcript', transcriptPath, e?.message || e);
+      // Si falló el archivo, como fallback dejamos inline
+      externalTrans = false;
+    }
   }
+
+  // Decidir si mantener transcript inline en JSON
+  const inlineTranscript = externalTrans ? undefined : pickInline;
 
   const filePath = path.join(shardDir, `${callId}.json`);
   const payload = {
     ...audit,
-    transcript: transcript, // si externalTrans=false, se mantiene
+    // Campos de transcript
+    transcript: inlineTranscript,                           // marcado/plano/crudo en JSON solo si INLINE=1 y no FORCE
+    transcriptMarked: marked,                               // conservamos marcado para UI
     transcriptPath: transcriptPath ? relToData(transcriptPath) : (audit.transcriptPath || null),
+
     metadata: {
       ...(audit.metadata || {}),
       callId,
