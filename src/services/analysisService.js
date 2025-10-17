@@ -1,4 +1,4 @@
-// src/services/analysisService.js
+// src/services/analysisService.js 
 import OpenAI from 'openai';
 
 /** ---------- Utils: parse JSON robusto ---------- */
@@ -83,13 +83,13 @@ function keyTipi(t = '') {
     .trim();
 }
 
-/* =============== Ítems críticos (Matriz V4) =============== */
-// Propuesta de pago y Abono comparten los mismos 11 ítems de la matriz V4:
-const PPY_ABONO_ITEMS = [
+/* =============== Ítems críticos por caso =============== */
+/** Propuesta de pago — mantiene los 11 ítems originales */
+const PP_ITEMS = [
   '1. Informa beneficios y consecuencias de no pago',
   '2. Realiza proceso completo de confirmación de la negociación',
   '3. Indaga motivo del no pago',
-  '4. Solicita autorización para contacto por otros medios (Ley 1581)',
+  '4. Solicita autorización para contacto por otros medios',
   '5. Despedida según guion establecido',
   '6. Ofrece alternativas acordes a la realidad del cliente y políticas vigentes',
   '7. Debate objeciones según situación del cliente',
@@ -97,6 +97,18 @@ const PPY_ABONO_ITEMS = [
   '9. Usa guion completo establecido por la campaña',
   '10. Evita argumentos engañosos con el cliente',
   '11. Utiliza vocabulario prudente y respetuoso'
+];
+
+/** Abono — solo los 8 ítems validados */
+const ABONO_ITEMS = [
+  '1. Informa beneficios y consecuencias de no pago',
+  '2. Indaga motivo del no pago',
+  '3. Despedida según guion establecido',
+  '4. Debate objeciones según situación del cliente',
+  '5. Informa que la llamada es grabada y monitoreada (Ley 1581)',
+  '6. Usa guion completo establecido por la campaña',
+  '7. Evita argumentos engañosos con el cliente',
+  '8. Utiliza vocabulario prudente y respetuoso'
 ];
 
 const NOVACION_ITEMS = [
@@ -174,7 +186,7 @@ DECISIÓN PREVIA:
 ${strictEvidenceBlock()}
 
 ÍTEMS CRÍTICOS (peso 100% si aplica):
-${PPY_ABONO_ITEMS.map(s => `- ${s}`).join('\n')}
+${PP_ITEMS.map(s => `- ${s}`).join('\n')}
 
 REGLA ESPECÍFICA — DESPEDIDA SEGÚN GUION (ítem 5):
 • Para **cumplir**, en la **parte final** de la llamada (último 25% del tiempo) debe existir una despedida que contenga al menos **dos** de estos tres elementos:
@@ -211,36 +223,43 @@ FRAUDE:
 function buildAbonoExtraPrompt() {
   return `
 EVALUACIÓN ESPECÍFICA — ABONO (Carteras Propias)
-Definición: el cliente **acepta realizar un pago parcial (abono)** a la obligación, definiendo **monto y/o fecha y/o medio**; no liquida la totalidad.
+Definición (operativa): **ABONO** es cuando el cliente se **compromete a realizar un pago parcial** (no liquida la totalidad) **sobre un ACUERDO VIGENTE**, con el fin explícito de **no perder dicho acuerdo ni sus beneficios** (p. ej., descuento, condiciones pactadas).
 
-DECISIÓN PREVIA:
-• Si **NO** hay compromiso de abono parcial, devuelve:
+DECISIÓN PREVIA (clasificación antes de puntuar):
+• Marca **"abono.aceptado": true** SOLO si se cumplen ambos criterios en la transcripción:
+  A) **Existe ACUERDO VIGENTE** (evidencia textual de “acuerdo/negociación/compromiso vigente”, “para no perder el acuerdo/descuento/beneficio”, “mantener el acuerdo”, etc.).
+  B) **Compromiso de PAGO PARCIAL** por parte del cliente (el cliente dice que hará un **abono**/pago parcial). Idealmente con **monto** y/o **fecha** y, si aparece, **canal oficial**.
+  — Nota: Si el cliente habla de pagar **todo** o cerrar la obligación completa, eso corresponde a **Propuesta de pago** (no ABONO).
+
+• Si **NO** se cumplen A y B:
   - "abono.aceptado": false
-  - "abono.motivo_no_aplica": "No aplica — sin compromiso de abono."
-  - Marca todos los ítems "aplica": false
+  - "abono.motivo_no_aplica": "No aplica — sin evidencia de acuerdo vigente y/o sin compromiso de pago parcial (abono)."
+  - En "consolidado.porAtributo": marca todos los ítems con "aplica": false
   - "consolidado.notaFinal": 0
   - FIN.
 
 ${strictEvidenceBlock()}
 
 ÍTEMS CRÍTICOS (peso 100% si aplica):
-${PPY_ABONO_ITEMS.map(s => `- ${s}`).join('\n')}
+${ABONO_ITEMS.map(s => `- ${s}`).join('\n')}
 
-Consideraciones:
-- En (2) “confirmación completa”, para **cumplir** espera confirmación **explícita** del abono: monto **y** fecha **y** medio (si falta cualquiera → no cumple).
-- En (6) alternativas, verifica que el asesor ofrezca opciones reales acordes a capacidad y políticas (p.ej., permitir abono cuando es viable).
+ACLARACIONES DE EVIDENCIA PARA ABONO:
+• El carácter **parcial** debe quedar claro (citas como: “haré un abono”, “pago parcial”, “no puedo pagar todo pero realizo un abono”, etc.).
+• El **acuerdo vigente** debe mencionarse de forma explícita o implícita verificable (citas como: “para no perder el acuerdo/descuento/beneficio”, “mantener el acuerdo que tengo”, “con el convenio/negociación actual”, etc.).
+• Si hay **monto y/o fecha** y **canal oficial**, inclúyelos en la justificación cuando corresponda; si faltan, no los inventes.
 
 CÁLCULO DE NOTA (binaria):
-• Solo ítems con "aplica": true.
-• Si **alguno** aplicable es "cumplido=false" → **notaFinal = 0**.
-• Si **todos** los aplicables son "cumplido=true" → **notaFinal = 100**.
-• Si nada aplica, **notaFinal = 100** (no penaliza).
+• Considera solo ítems con "aplica": true.
+• Si **alguno** aplicable tiene "cumplido": false → **notaFinal = 0**.
+• Si **todos** los aplicables tienen "cumplido": true → **notaFinal = 100**.
+• Si ningún ítem aplica (caso raro manteniendo A y B), notaFinal = 100 (no penaliza).
 
 FRAUDE:
 • Señala "cuenta_no_oficial" cuando se pida consignar/transferir a canal NO oficial.
 • Señala "contacto_numero_no_oficial" por uso de números/WhatsApp personales.
 `.trim();
 }
+
 
 /* ==================== Helpers de consolidado (post-proceso) ==================== */
 function normalizePorAtributo(list = []) {
@@ -270,7 +289,7 @@ function computeBinaryScore(porAtrib = [], accepted = true) {
   return anyFail ? 0 : 100;
 }
 
-function ensureBlock(list, labels) {
+function ensureBlock(list, _labels) {
   // Si el modelo no devolvió todos los ítems, no forzamos completarlos,
   // pero sí mantenemos lo recibido consistente.
   return normalizePorAtributo(Array.isArray(list) ? list : []);
@@ -359,8 +378,8 @@ Marca alertas de FRAUDE si el agente pide consignar/transferir a canal NO oficia
   // ---- Instrucciones de salida (JSON) ----
   const commonJsonShape = `
 {
-  "agent_name": "string (si no hay evidencia, \\"\\" )",
-  "client_name": "string (si no hay evidencia, \\"\\" )",
+  "agent_name": "string (si no hay evidencia, \\"\\")",
+  "client_name": "string (si no hay evidencia, \\"\\")",
   "resumen": "100-150 palabras, sin inventar nombres/fechas/montos",
   "hallazgos": ["3-6 bullets operativos y específicos sobre lo que sí aparece"],
   "sugerencias_generales": ["2-4 puntos accionables de mejora"],
@@ -383,8 +402,8 @@ Marca alertas de FRAUDE si el agente pide consignar/transferir a canal NO oficia
 
   const novacionJsonShape = `
 {
-  "agent_name": "string (si no hay evidencia, \\"\\" )",
-  "client_name": "string (si no hay evidencia, \\"\\" )",
+  "agent_name": "string (si no hay evidencia, \\"\\")",
+  "client_name": "string (si no hay evidencia, \\"\\")",
   "resumen": "100-150 palabras (claridad de oferta, consentimiento, 1581/1266 si aplica, objeciones, tono)",
   "hallazgos": ["3-6 bullets operativos y específicos sobre lo que sí aparece"],
   "sugerencias_generales": ["2-4 puntos accionables de mejora"],
@@ -409,8 +428,8 @@ Marca alertas de FRAUDE si el agente pide consignar/transferir a canal NO oficia
 
   const propuestaJsonShape = `
 {
-  "agent_name": "string (si no hay evidencia, \\"\\" )",
-  "client_name": "string (si no hay evidencia, \\"\\" )",
+  "agent_name": "string (si no hay evidencia, \\"\\")",
+  "client_name": "string (si no hay evidencia, \\"\\")",
   "resumen": "100-150 palabras (protocolo, legalidad 1581/1266, cierre y tono)",
   "hallazgos": ["3-6 bullets operativos y específicos sobre lo que sí aparece"],
   "sugerencias_generales": ["2-4 puntos accionables de mejora"],
@@ -419,7 +438,7 @@ Marca alertas de FRAUDE si el agente pide consignar/transferir a canal NO oficia
   "consolidado": {
     "notaFinal": 0,
     "porAtributo": [
-      ${PPY_ABONO_ITEMS.map(t =>
+      ${PP_ITEMS.map(t =>
         `{"atributo":"${t.replace(/"/g, '\\"')}","aplica":true,"cumplido":true,"justificacion":"","mejora":""}`
       ).join(',\n      ')}
     ]
@@ -435,8 +454,8 @@ Marca alertas de FRAUDE si el agente pide consignar/transferir a canal NO oficia
 
   const abonoJsonShape = `
 {
-  "agent_name": "string (si no hay evidencia, \\"\\" )",
-  "client_name": "string (si no hay evidencia, \\"\\" )",
+  "agent_name": "string (si no hay evidencia, \\"\\")",
+  "client_name": "string (si no hay evidencia, \\"\\")",
   "resumen": "100-150 palabras (protocolo, legalidad 1581/1266, cierre y tono)",
   "hallazgos": ["3-6 bullets operativos y específicos sobre lo que sí aparece"],
   "sugerencias_generales": ["2-4 puntos accionables de mejora"],
@@ -445,7 +464,7 @@ Marca alertas de FRAUDE si el agente pide consignar/transferir a canal NO oficia
   "consolidado": {
     "notaFinal": 0,
     "porAtributo": [
-      ${PPY_ABONO_ITEMS.map(t =>
+      ${ABONO_ITEMS.map(t =>
         `{"atributo":"${t.replace(/"/g, '\\"')}","aplica":true,"cumplido":true,"justificacion":"","mejora":""}`
       ).join(',\n      ')}
     ]
@@ -514,6 +533,38 @@ ${
   if (isNovacionCP)       analisis = ensureConsolidadoForType(analisis, 'novacion');
   if (isPropuestaPagoCP)  analisis = ensureConsolidadoForType(analisis, 'propuesta_pago');
   if (isAbonoCP)          analisis = ensureConsolidadoForType(analisis, 'abono');
+
+  // --- Compatibilidad para renderizadores MD antiguos (aliases planos)
+  analisis.afectadosCriticos = Array.isArray(analisis?.consolidado?.afectadosCriticos)
+    ? analisis.consolidado.afectadosCriticos
+    : [];
+  analisis.porAtributo = Array.isArray(analisis?.consolidado?.porAtributo)
+    ? analisis.consolidado.porAtributo
+    : [];
+
+  // --- Compatibilidad: exponer arreglos "errores_criticos" y "alertas_antifraude"
+  if (String(process.env.EXPOSE_CRIT_ARRAYS ?? '1') !== '0') {
+    const porAttr = Array.isArray(analisis?.consolidado?.porAtributo)
+      ? analisis.consolidado.porAtributo
+      : [];
+
+    analisis.errores_criticos = porAttr
+      .filter(a => a.aplica === true && a.cumplido === false)
+      .map(a => ({
+        atributo: a.atributo,
+        severidad: 'critico',
+        justificacion: a.justificacion || 'no_evidencia',
+        mejora: a.mejora || ''
+      }));
+
+    analisis.alertas_antifraude = Array.isArray(analisis?.fraude?.alertas)
+      ? analisis.fraude.alertas
+      : [];
+
+    // Aliases por compatibilidad con integraciones antiguas
+    analisis.critical_errors  = analisis.errores_criticos;
+    analisis.antifraud_alerts = analisis.alertas_antifraude;
+  }
 
   // Merge con heurística local anti-fraude (sin duplicar)
   const heur = detectFraudHeuristics(String(transcript || ''));
