@@ -56,6 +56,16 @@ async function mapWithConcurrency(items, concurrency, worker) {
   });
 }
 
+/* -------------------- Normalizador de consolidado --------------------- */
+function computeAfectadosCriticos(consol = {}) {
+  const lista = Array.isArray(consol?.porAtributo) ? consol.porAtributo : [];
+  const afectados = lista
+    .filter(a => a?.aplica === true && a?.cumplido === false)
+    .map(a => String(a?.atributo || '').trim())
+    .filter(Boolean);
+  return { ...(consol || {}), afectadosCriticos: afectados };
+}
+
 /* ------------------------------ SSE ---------------------------------- */
 function initSSE(res) {
   res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
@@ -178,7 +188,7 @@ async function handleDirect(req, res) {
         // c) Analizar
         const analisis = await analyzeTranscriptSimple({ transcript: transcriptMarked, campania, tipificacion: tipi, tipi_prompt: tipiPromptUI });
 
-        // d) Consolidado
+        // d) Consolidado (forzar afectadosCriticos)
         const consolidadoFromModel = (analisis && typeof analisis.consolidado === 'object') ? analisis.consolidado : null;
         let nota = (consolidadoFromModel && Number.isFinite(Number(consolidadoFromModel.notaFinal)))
           ? Math.round(Number(consolidadoFromModel.notaFinal))
@@ -188,7 +198,11 @@ async function handleDirect(req, res) {
             Number(analisis?.notaFinal) || Number(analisis?.nota) ||
             Number(analisis?.score)     || Number(analisis?.scoring) || null;
         }
-        const consolidado = consolidadoFromModel ?? (Number.isFinite(nota) ? { notaFinal: Math.round(nota) } : undefined);
+        const consolidadoRaw = consolidadoFromModel ?? (Number.isFinite(nota) ? { notaFinal: Math.round(nota) } : undefined);
+        const consolidado = computeAfectadosCriticos(consolidadoRaw);
+
+        // Sincroniza el consolidado dentro del analisis
+        if (analisis) analisis.consolidado = { ...(analisis.consolidado || {}), ...consolidado };
 
         // e) Persistencia individual
         const metadata = {
@@ -379,7 +393,11 @@ async function handleStart(req, res) {
             Number(analisis?.notaFinal) || Number(analisis?.nota) ||
             Number(analisis?.score)     || Number(analisis?.scoring) || null;
         }
-        const consolidado = consolidadoFromModel ?? (Number.isFinite(nota) ? { notaFinal: Math.round(nota) } : undefined);
+        const consolidadoRaw = consolidadoFromModel ?? (Number.isFinite(nota) ? { notaFinal: Math.round(nota) } : undefined);
+        const consolidado = computeAfectadosCriticos(consolidadoRaw);
+
+        // sincroniza en analisis
+        if (analisis) analisis.consolidado = { ...(analisis.consolidado || {}), ...consolidado };
 
         const metadata = {
           timestamp: new Date().toISOString(),

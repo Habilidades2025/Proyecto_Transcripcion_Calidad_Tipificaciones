@@ -176,9 +176,24 @@ ${strictEvidenceBlock()}
 ÍTEMS CRÍTICOS (peso 100% si aplica):
 ${PPY_ABONO_ITEMS.map(s => `- ${s}`).join('\n')}
 
-Consideraciones:
-- En (2) “confirmación completa de la negociación”, para **cumplir** espera confirmación **explícita** de monto **y** fecha **y** medio de pago (si uno falta → no cumple).
-- En (6) alternativas, valida que sean acordes a realidad y políticas (no forzar pago total si el cliente planteó límites).
+REGLA ESPECÍFICA — DESPEDIDA SEGÚN GUION (ítem 5):
+• Para **cumplir**, en la **parte final** de la llamada (último 25% del tiempo) debe existir una despedida que contenga al menos **dos** de estos tres elementos:
+  1) **Identificación del agente + empresa** en una forma cercana al guion:
+     - Variantes válidas: "Habló con/Le habló Soy [Nombre] de Contacto Solution(s)/Novartec".
+     - Se acepta solo el **nombre** o primer nombre del agente.
+  2) **Agradecimiento**: “gracias”, “muchas gracias”, “agradezco su atención/tiempo”.
+  3) **Buen deseo**: “feliz día/tarde/noche”, “que esté muy bien”, “un excelente día”.
+• Ejemplos que **sí cumplen**:
+  - "Le habló Ana de Contacto Solutions, muchas gracias, feliz día."
+  - "Soy Juan de Novartec, gracias por su tiempo, un excelente día."
+• Ejemplos que **NO cumplen**:
+  - Solo “gracias, hasta luego” (sin empresa ni buen deseo).
+  - Menciones sueltas de la empresa en medio de la llamada que no formen la despedida.
+• La **justificación** debe citar literalmente la frase de cierre (con hora aproximada). Si no hay evidencia suficiente → **cumplido=false** para el ítem 5.
+
+ACLARACIONES:
+- En (2) “confirmación completa de la negociación”, para **cumplir** exige confirmación **explícita** de monto **y** fecha **y** medio oficial de pago. Si falta cualquiera → **no cumple**.
+- En (6) alternativas, valida que sean acordes a la realidad del cliente y a políticas vigentes.
 
 CÁLCULO DE NOTA (binaria):
 • Solo ítems con "aplica": true.

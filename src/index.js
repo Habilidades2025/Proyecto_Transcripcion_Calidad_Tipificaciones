@@ -73,3 +73,12 @@ function start(port, attemptsLeft = 3) {
 
 const PORT = Number(process.env.PORT) || 3000;
 start(PORT);
+
+console.log('[boot] execArgv=', process.execArgv);
+
+process.on('uncaughtException', (err) => {
+  console.error('[FATAL] UncaughtException', err);
+});
+process.on('unhandledRejection', (reason, p) => {
+  console.error('[FATAL] UnhandledRejection', reason);
+});
