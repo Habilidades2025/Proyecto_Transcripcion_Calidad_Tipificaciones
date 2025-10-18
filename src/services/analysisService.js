@@ -115,7 +115,7 @@ const NOVACION_ITEMS = [
   '1. Informa beneficios y consecuencias de aceptar la novación',
   '2. Realiza proceso completo de confirmación de la novación (monto, cuotas, tasa y plazos)',
   '3. Indaga motivo por el cual el titular requiere la novación',
-  '4. Solicita autorización para contacto por otros medios (Ley 1581)',
+  '4. Solicita autorización para contacto por otros medios',
   '5. Despedida según guion establecido',
   '6. Explica correctamente condiciones del nuevo crédito (cuotas, tasas, beneficios)',
   '7. Gestiona objeciones sobre tasa o plazo con argumentos claros',

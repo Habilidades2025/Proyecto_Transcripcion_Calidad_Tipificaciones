@@ -28,6 +28,12 @@ const REPORTS_BATCH_DIR = path.join(REPORTS_DIR, 'batches');
 function ensureDir(d) { if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true }); }
 function toInt(v, def) { const n = Number(v); return Number.isFinite(n) ? n : def; }
 
+// consolidado seguro: raíz -> analisis.consolidado -> {}
+function getConsolidado(audit) {
+  const an = audit?.analisis || {};
+  return audit?.consolidado || an?.consolidado || {};
+}
+
 function isCritical(attr) {
   if (!attr || typeof attr !== 'object') return false;
   if (typeof attr.critico === 'boolean') return attr.critico;
@@ -40,7 +46,7 @@ function isCritical(attr) {
 
 function splitAffected(consolidado) {
   const arr = Array.isArray(consolidado?.porAtributo) ? consolidado.porAtributo : [];
-  const incumplidos = arr.filter(a => a && a.cumplido === false);
+  const incumplidos = arr.filter(a => a && a.aplica === true && a.cumplido === false);
   const criticos = [], noCriticos = [];
   for (const a of incumplidos) {
     const nombre = a?.atributo || a?.nombre || '(sin nombre)';
@@ -66,27 +72,35 @@ function buildCallMarkdown(audit) {
   const lines = [];
   const meta = audit?.metadata || {};
   const an   = audit?.analisis  || {};
-  const cons = audit?.consolidado || {};
+  const cons = getConsolidado(audit);
   const transcriptMarked = String(audit?.transcriptMarked || '').trim();
 
-  const fecha = meta.timestamp ? new Date(meta.timestamp).toLocaleString() : '';
-  const agente  = meta.agentName    || an.agent_name  || '-';
-  const cliente = meta.customerName || an.client_name || '-';
-  const nota    = cons?.notaFinal ?? 0;
+  const fecha        = meta.timestamp ? new Date(meta.timestamp).toLocaleString() : '';
+  const agente       = meta.agentName    || an.agent_name  || '-';
+  const cliente      = meta.customerName || an.client_name || '-';
+  const campania     = meta.campania     || '';
+  const tipificacion = meta.tipificacion || '';
+  const nota         = cons?.notaFinal ?? 0;
 
-  const { criticos, noCriticos } = splitAffected(cons);
+  // Críticos con fallback (prioriza consolidado.afectadosCriticos)
+  const criticos = Array.isArray(cons?.afectadosCriticos)
+    ? cons.afectadosCriticos
+    : splitAffected(cons).criticos;
+
   const fraudes = Array.isArray(an?.fraude?.alertas) ? an.fraude.alertas : [];
 
   lines.push(`# Reporte de Llamada — ${meta.callId || '(sin id)'}\n`);
   lines.push(`**Fecha:** ${fecha}  `);
   lines.push(`**Agente:** ${agente}  `);
   lines.push(`**Cliente:** ${cliente}  `);
+  if (campania)     lines.push(`**Campaña:** ${campania}  `);
+  if (tipificacion) lines.push(`**Tipificación:** ${tipificacion}  `);
   lines.push(`**Nota:** ${nota}/100`);
 
   lines.push('\n## Resumen\n');
   lines.push(an?.resumen || '—');
 
-  // <<< NUEVO: Transcripción con tiempos/rol >>>
+  // Transcripción con tiempos/rol
   lines.push('\n## Transcripción (tiempos y rol)\n');
   lines.push(transcriptMarked || '(no disponible con este proveedor)');
 
@@ -99,10 +113,6 @@ function buildCallMarkdown(audit) {
 
   lines.push('\n## Afectados (críticos)');
   lines.push(criticos.length ? `- ${criticos.join('\n- ')}` : '- —');
-
-  // Ya no listamos “no críticos” por tu configuración
-  // lines.push('\n## Afectados (no críticos)');
-  // lines.push(noCriticos.length ? `- ${noCriticos.join('\n- ')}` : '- —');
 
   lines.push('\n## Sugerencias');
   if (Array.isArray(an?.sugerencias_generales) && an.sugerencias_generales.length) {
@@ -163,6 +173,10 @@ router.get('/audits/export.json', (req, res) => {
 });
 
 // === Export a Excel (con paginación opcional) ===
+// Requisitos:
+// - Columna nueva "ID de la llamada" (numérica, secuencial desde 1)
+// - La columna que antes era "ID de la llamada" pasa a "Nombre de la llamada"
+// - Una fila por cada "Atributo crítico afectado" (si hay varios, mismo ID repetido)
 router.get('/audits/export.xlsx', (req, res) => {
   const hasPaging = (req.query.offset !== undefined) || (req.query.limit !== undefined);
   let items = [];
@@ -174,33 +188,71 @@ router.get('/audits/export.xlsx', (req, res) => {
     items = listAudits();
   }
 
-  const rows = items.map(it => {
-    const { criticos } = splitAffected(it?.consolidado);
-    const fecha = it?.metadata?.timestamp ? new Date(it.metadata.timestamp).toLocaleString() : '';
-    const agente  = it?.metadata?.agentName    || it?.analisis?.agent_name  || '';
-    const cliente = it?.metadata?.customerName || it?.analisis?.client_name || '';
-    const resumen = it?.analisis?.resumen ? String(it.analisis.resumen).replace(/\s+/g, ' ').trim() : '';
-    const fraude  = buildFraudString(it?.analisis);
+  // Asignar ID secuencial por llamada (1..N) según el orden actual del listado
+  // Luego expandimos a "una fila por crítico" conservando el mismo ID para esa llamada
+  const rows = [];
+  items.forEach((it, idx) => {
+    const idSecuencial = idx + 1; // inicia en 1
+    const cons        = getConsolidado(it);
 
-    return {
-      'ID de la llamada': it?.metadata?.callId ?? '',
-      'Fecha': fecha,
-      'Agente': agente,
-      'Cliente': cliente,
-      'Nota': it?.consolidado?.notaFinal ?? '',
-      'Atributos críticos afectados': criticos.join(', '),
-      'Alerta de fraude': fraude,
-      'Resumen': resumen
-    };
+    const afectados   = Array.isArray(cons?.afectadosCriticos)
+      ? cons.afectadosCriticos
+      : splitAffected(cons).criticos;
+
+    const fecha       = it?.metadata?.timestamp ? new Date(it.metadata.timestamp).toLocaleString() : '';
+    const agente      = it?.metadata?.agentName    || it?.analisis?.agent_name  || '';
+    const cliente     = it?.metadata?.customerName || it?.analisis?.client_name || '';
+    const campania    = it?.metadata?.campania     || '';
+    const tipificacion= it?.metadata?.tipificacion || '';
+    const nombreLlamada = it?.metadata?.callId ?? ''; // ahora "Nombre de la llamada"
+    const resumen     = it?.analisis?.resumen ? String(it.analisis.resumen).replace(/\s+/g, ' ').trim() : '';
+    const fraude      = buildFraudString(it?.analisis);
+    const nota        = cons?.notaFinal ?? '';
+
+    if (afectados.length > 0) {
+      for (const atributo of afectados) {
+        rows.push({
+          'ID de la llamada': idSecuencial,         // NUEVO ID secuencial
+          'Nombre de la llamada': nombreLlamada,    // antes "ID de la llamada"
+          'Fecha': fecha,
+          'Agente': agente,
+          'Cliente': cliente,
+          'Campaña': campania,
+          'Tipificación': tipificacion,
+          'Nota': nota,
+          'Atributo crítico afectado': atributo,
+          'Alerta de fraude': fraude,
+          'Resumen': resumen
+        });
+      }
+    } else {
+      // Sin críticos: generamos una fila igualmente, con atributo vacío
+      rows.push({
+        'ID de la llamada': idSecuencial,
+        'Nombre de la llamada': nombreLlamada,
+        'Fecha': fecha,
+        'Agente': agente,
+        'Cliente': cliente,
+        'Campaña': campania,
+        'Tipificación': tipificacion,
+        'Nota': nota,
+        'Atributo crítico afectado': '',
+        'Alerta de fraude': fraude,
+        'Resumen': resumen
+      });
+    }
   });
 
   const headers = [
-    'ID de la llamada',
+    'ID de la llamada',           // numérico, secuencial
+    'Nombre de la llamada',       // antes: ID de la llamada (string)
     'Fecha',
     'Agente',
     'Cliente',
+    'Campaña',
+    'Tipificación',
     'Nota',
-    'Atributos críticos afectados',
+    'Atributo crítico afectado',  // una fila por cada crítico
     'Alerta de fraude',
     'Resumen',
   ];
