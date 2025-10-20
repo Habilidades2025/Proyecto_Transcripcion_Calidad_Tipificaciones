@@ -71,7 +71,8 @@ const TIPI_RULES = {
   // estos se inyectan dinámicamente por campaña:
   'novacion': '',
   'propuesta de pago': '',
-  'abono': ''
+  'abono': '',
+  'acuerdo a cuotas': '' 
 };
 
 /** Normaliza tipificación para indexar TIPI_RULES */
@@ -109,6 +110,21 @@ const ABONO_ITEMS = [
   '6. Usa guion completo establecido por la campaña',
   '7. Evita argumentos engañosos con el cliente',
   '8. Utiliza vocabulario prudente y respetuoso'
+];
+
+/** Acuerdo a cuotas — 11 ítems centrados en condiciones del plan */
+const ACUERDO_CUOTAS_ITEMS = [
+  '1. Informa beneficios y consecuencias de aceptar el acuerdo a cuotas',
+  '2. Confirma condiciones completas (número de cuotas, valor por cuota, fecha de inicio y canal oficial)',
+  '3. Indaga motivo por el cual el titular requiere pago en cuotas',
+  '4. Solicita autorización para contacto por otros medios',
+  '5. Despedida según guion establecido',
+  '6. Explica correctamente condiciones del plan (cuotas, fechas, posibles intereses/condiciones)',
+  '7. Gestiona objeciones con argumentos claros acorde a políticas',
+  '8. Informa que la llamada es grabada y monitoreada (Ley 1581)',
+  '9. Usa el guion completo establecido por la campaña',
+  '10. Evita argumentos engañosos o coercitivos',
+  '11. Utiliza vocabulario prudente y respetuoso'
 ];
 
 const NOVACION_ITEMS = [
@@ -260,6 +276,40 @@ FRAUDE:
 `.trim();
 }
 
+/* --- Acuerdo a cuotas (Carteras Propias) --- */
+function buildAcuerdoCuotasExtraPrompt() {
+  return `
+EVALUACIÓN ESPECÍFICA — ACUERDO A CUOTAS (Carteras Propias)
+Definición: el cliente **acepta un plan de pagos fraccionado** (acuerdo a cuotas) para cumplir su obligación, con **número de cuotas**, **valor por cuota**, **fecha de inicio** y (si aparece) **canal oficial**.
+
+DECISIÓN PREVIA:
+• Si **NO** hay aceptación formal del acuerdo a cuotas (no se evidencia intención real de pagar mediante cuotas o no se confirma el esquema):
+  - "acuerdo_cuotas.aceptado": false
+  - "acuerdo_cuotas.motivo_no_aplica": "No aplica — sin aceptación formal del acuerdo a cuotas."
+  - Marca todos los ítems con "aplica": false
+  - "consolidado.notaFinal": 0
+  - FIN.
+
+${strictEvidenceBlock()}
+
+ÍTEMS CRÍTICOS (peso 100% si aplica):
+${ACUERDO_CUOTAS_ITEMS.map(s => `- ${s}`).join('\n')}
+
+ACLARACIONES:
+• Para **cumplir** el ítem 2 (confirmación completa) exige mención explícita de: **número de cuotas**, **valor por cuota**, **fecha de inicio** y **canal oficial** (si no están todos → **no cumple**).
+• Valida que las explicaciones y objeciones estén **acordes a políticas vigentes**.
+
+CÁLCULO DE NOTA (binaria):
+• Solo ítems con "aplica": true.
+• Si **alguno** aplicable es "cumplido=false" → **notaFinal = 0**.
+• Si **todos** los aplicables son "cumplido=true" → **notaFinal = 100**.
+• Si nada aplica, **notaFinal = 100** (no penaliza).
+
+FRAUDE:
+• Canales NO oficiales de pago → "cuenta_no_oficial".
+• Contactos NO oficiales (número personal/WhatsApp) → "contacto_numero_no_oficial".
+`.trim();
+}
 
 /* ==================== Helpers de consolidado (post-proceso) ==================== */
 function normalizePorAtributo(list = []) {
@@ -326,6 +376,11 @@ function ensureConsolidadoForType(analisis = {}, type) {
     rawPorAttr = analisis?.consolidado?.porAtributo;
   }
 
+  if (type === 'acuerdo_cuotas') {
+    accepted = analisis?.acuerdo_cuotas?.aceptado !== false;
+    rawPorAttr = analisis?.consolidado?.porAtributo;
+  }
+
   const porAtributo = ensureBlock(rawPorAttr);
   const nota = computeBinaryScore(porAtributo, accepted);
   const afectadosCriticos = deriveAffectedCriticos(porAtributo);
@@ -357,9 +412,10 @@ export async function analyzeTranscriptSimple({
   const campKey = keyTipi(campania);
 
   const isCP = campKey === 'carteras propias';
-  const isNovacionCP      = isCP && (tipKey === 'novacion' || tipKey === 'novación');
-  const isPropuestaPagoCP = isCP && (tipKey === 'propuesta de pago' || tipKey === 'propuesta_pago');
-  const isAbonoCP         = isCP && (tipKey === 'abono');
+  const isNovacionCP       = isCP && (tipKey === 'novacion' || tipKey === 'novación');
+  const isPropuestaPagoCP  = isCP && (tipKey === 'propuesta de pago' || tipKey === 'propuesta_pago');
+  const isAbonoCP          = isCP && (tipKey === 'abono');
+  const isAcuerdoCuotasCP  = isCP && (tipKey === 'acuerdo a cuotas' || tipKey === 'acuerdo_a_cuotas' || tipKey === 'acuerdo cuotas');
 
   // ---- System prompt (siempre con canales oficiales para marcar fraude) ----
   const system = `
@@ -374,6 +430,7 @@ Marca alertas de FRAUDE si el agente pide consignar/transferir a canal NO oficia
   if (isNovacionCP)       extraTip = buildNovacionExtraPrompt();
   if (isPropuestaPagoCP)  extraTip = buildPropuestaPagoExtraPrompt();
   if (isAbonoCP)          extraTip = buildAbonoExtraPrompt();
+  if (isAcuerdoCuotasCP)  extraTip = buildAcuerdoCuotasExtraPrompt();
 
   // ---- Instrucciones de salida (JSON) ----
   const commonJsonShape = `
@@ -478,6 +535,32 @@ Marca alertas de FRAUDE si el agente pide consignar/transferir a canal NO oficia
 }
 `.trim();
 
+  const acuerdoCuotasJsonShape = `
+{
+  "agent_name": "string (si no hay evidencia, \\"\\")",
+  "client_name": "string (si no hay evidencia, \\"\\")",
+  "resumen": "100-150 palabras (condiciones del plan en cuotas, legalidad 1581/1266, objeciones, cierre y tono)",
+  "hallazgos": ["3-6 bullets operativos y específicos sobre lo que sí aparece"],
+  "sugerencias_generales": ["2-4 puntos accionables de mejora"],
+  "flags": { "acuerdo_cuotas_aceptado": true, "ley_1581_mencionada": true, "hubo_objeciones": true, "despedida_adecuada": true },
+  "acuerdo_cuotas": { "aceptado": true, "motivo_no_aplica": "" },
+  "consolidado": {
+    "notaFinal": 0,
+    "porAtributo": [
+      ${ACUERDO_CUOTAS_ITEMS.map(t =>
+        `{"atributo":"${t.replace(/"/g, '\\"')}","aplica":true,"cumplido":true,"justificacion":"","mejora":""}`
+      ).join(',\n      ')}
+    ]
+  },
+  "fraude": {
+    "alertas": [
+      { "tipo": "cuenta_no_oficial|contacto_numero_no_oficial|otro", "cita": "frase breve", "riesgo": "alto|medio|bajo" }
+    ],
+    "observaciones": "string"
+  }
+}
+`.trim();
+
   const user = `
 CONTEXTO:
 - Campaña: ${campania}
@@ -490,9 +573,10 @@ ${String(transcript || '').slice(0, Number(process.env.ANALYSIS_MAX_INPUT_CHARS)
 
 Devuelve SOLO este JSON:
 ${
-  isNovacionCP       ? novacionJsonShape   :
-  isPropuestaPagoCP  ? propuestaJsonShape  :
-  isAbonoCP          ? abonoJsonShape      :
+  isNovacionCP       ? novacionJsonShape      :
+  isPropuestaPagoCP  ? propuestaJsonShape     :
+  isAbonoCP          ? abonoJsonShape         :
+  isAcuerdoCuotasCP  ? acuerdoCuotasJsonShape :
   commonJsonShape
 }
 `.trim();
@@ -526,6 +610,7 @@ ${
     novacion: json?.novacion,
     propuesta_pago: json?.propuesta_pago,
     abono: json?.abono,
+    acuerdo_cuotas: json?.acuerdo_cuotas,
     consolidado: json?.consolidado
   };
 
@@ -533,6 +618,7 @@ ${
   if (isNovacionCP)       analisis = ensureConsolidadoForType(analisis, 'novacion');
   if (isPropuestaPagoCP)  analisis = ensureConsolidadoForType(analisis, 'propuesta_pago');
   if (isAbonoCP)          analisis = ensureConsolidadoForType(analisis, 'abono');
+  if (isAcuerdoCuotasCP)  analisis = ensureConsolidadoForType(analisis, 'acuerdo_cuotas');
 
   // --- Compatibilidad para renderizadores MD antiguos (aliases planos)
   analisis.afectadosCriticos = Array.isArray(analisis?.consolidado?.afectadosCriticos)

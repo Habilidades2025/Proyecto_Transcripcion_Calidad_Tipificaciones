@@ -1,7 +1,7 @@
 {
   "name": "quality-analyst-ia",
   "version": "3.0.1",
-  "description": "Analista de calidad: transcribe con Faster-Whisper y analiza con OpenAI. UI + consolidado.",
+  "description": "Analista de calidad: transcribe con Whisper de Open AI y Deeepgram y analiza con OpenAI. UI + consolidado.",
   "type": "module",
   "main": "src/index.js",
   "scripts": {

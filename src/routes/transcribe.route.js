@@ -38,7 +38,7 @@ function baseTxtName(original) {
 
 /**
  * Normaliza parámetros desde el body:
- * - Acepta alias para provider: openai | faster | deepgram (dg/deep)
+ * - Acepta alias para provider: openai | deepgram (dg/deep)
  * - Si no viene, usa TRANSCRIBE_PROVIDER del .env
  * - Valida proveedor y devuelve language/mode/agentChannel/model/mimetype
  */
@@ -50,18 +50,15 @@ function pickOptsFromBody(body = {}) {
 
   const map = {
     'openai': 'openai',
-    'faster': 'faster',
-    'fw': 'faster',
-    'local': 'faster',
     'deepgram': 'deepgram',
     'dg': 'deepgram',
     'deep': 'deepgram'
   };
   const provider = map[raw] || map[envRaw] || 'openai';
 
-  const allowed = new Set(['openai', 'faster', 'deepgram']);
+  const allowed = new Set(['openai', 'deepgram']);
   if (!allowed.has(provider)) {
-    const err = new Error(`provider inválido: "${raw}". Usa "faster", "openai" o "deepgram".`);
+    const err = new Error(`provider inválido: "${raw}". Usa "openai" o "deepgram".`);
     err.status = 400;
     throw err;
   }

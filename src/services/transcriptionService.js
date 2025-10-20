@@ -1,17 +1,6 @@
 // src/services/transcriptionService.js
 import OpenAI from 'openai';
 import { toFile } from 'openai/uploads';
-import { Agent, setGlobalDispatcher } from 'undici';
-
-/* ===================== Config de timeouts (fetch/undici) ===================== */
-const FW_TIMEOUT_MS         = Number(process.env.FW_TIMEOUT_MS || 600000);         // abort total (10 min)
-const FW_HEADERS_TIMEOUT_MS = Number(process.env.FW_HEADERS_TIMEOUT_MS || 600000); // headers (10 min)
-const FW_BODY_TIMEOUT_MS    = Number(process.env.FW_BODY_TIMEOUT_MS || 3600000);   // body (60 min)
-
-setGlobalDispatcher(new Agent({
-  headersTimeout: FW_HEADERS_TIMEOUT_MS,
-  bodyTimeout: FW_BODY_TIMEOUT_MS
-}));
 
 /* ============================ Defaults de entorno ============================ */
 const ENV_PROVIDER = String(process.env.TRANSCRIBE_PROVIDER || 'openai')
@@ -255,7 +244,7 @@ function normalizeArgs(buffer, a1, a2, a3) {
 
 function resolveProvider(input) {
   const fromReq = String(input || '').trim().toLowerCase();
-  const allowed = new Set(['openai', 'faster', 'deepgram']);
+  const allowed = new Set(['openai', 'deepgram']);
   if (allowed.has(fromReq)) return fromReq;
 
   const fromEnv = String(ENV_PROVIDER).toLowerCase();
@@ -309,8 +298,7 @@ export async function transcribeAudio(buffer, a1, a2, a3) {
     return out;
   }
 
-  // provider === 'faster' (Faster-Whisper local)
-  return transcribeAudioLocal(buffer, filename, language);
+  throw new Error('Proveedor de transcripción no soportado.');
 }
 
 /* ============================== OpenAI Whisper ============================== */
@@ -355,7 +343,7 @@ function guessMimeFromName(name = '') {
   switch (ext) {
     case 'mp3':  return 'audio/mpeg';
     case 'wav':  return 'audio/wav';
-    case 'm4a':  return 'audio/mp4';   // m4a suele servirse como audio/mp4
+    case 'm4a':  return 'audio/mp4';
     case 'aac':  return 'audio/aac';
     case 'ogg':  return 'audio/ogg';
     case 'oga':  return 'audio/ogg';
@@ -571,57 +559,5 @@ async function transcribeAudioDeepgram(buffer, filename, language) {
     }
 
     throw err;
-  }
-}
-
-/* ===================== Faster-Whisper local (fw-server) ===================== */
-async function transcribeAudioLocal(buffer, filename, language) {
-  let url = (process.env.FW_SERVER_URL || 'http://127.0.0.1:8000/transcribe')
-              .trim()
-              .replace('localhost', '127.0.0.1');
-
-  console.log('[FW][POST]', url, 'len=', buffer?.byteLength || buffer?.length, 'lang=', language, 'timeoutMs=', FW_TIMEOUT_MS);
-
-  const fd = new FormData();
-  const blob = new Blob([buffer]);
-  fd.append('file', blob, filename || 'audio.wav');
-  fd.append('language', (language || 'es-ES').split('-')[0]);
-
-  try {
-    const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), FW_TIMEOUT_MS);
-
-    const resp = await fetch(url, {
-      method: 'POST',
-      body: fd,
-      signal: ctrl.signal
-    });
-    clearTimeout(t);
-
-    if (!resp.ok) {
-      const txt = await resp.text().catch(() => '');
-      throw new Error(`FW server error ${resp.status}: ${txt}`);
-    }
-
-    const json = await resp.json().catch(() => ({}));
-
-    const ok = (json.ok === undefined) ? true : !!json.ok;
-    if (!ok) throw new Error(json.error || 'Faster-Whisper error');
-
-    const text = String(json?.text || '').trim();
-
-    const segments = Array.isArray(json?.segments)
-      ? json.segments.map(s => ({
-          start: s?.start ?? s?.offset ?? 0,
-          end:   s?.end   ?? (s?.start ?? 0) + 2,
-          text:  s?.text ?? ''
-        }))
-      : [];
-
-    const linesRoleLabeled = formatTranscriptLinesMono(segments);
-    return { text, segments, linesRoleLabeled };
-  } catch (e) {
-    console.error('[FW][ERROR]', e?.name, e?.message, e?.cause?.code || '');
-    throw e;
   }
 }

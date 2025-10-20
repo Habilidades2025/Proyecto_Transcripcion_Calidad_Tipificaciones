@@ -213,6 +213,12 @@ Analiza la llamada "Propuesta de pago".
 Analiza la llamada "Abono".
 - Extrae SOLO lo dicho: monto, fecha(s) y canal oficial. Si no se cierra, marca "negociacion_no_cerrada".
 - Devuelve: resumen, hallazgos[], fraude.alertas[].
+`.trim(),
+  // <<< NUEVO >>>
+  'Acuerdo a cuotas': `
+Analiza la llamada "Acuerdo a cuotas".
+- Verifica que exista aceptación formal del plan en cuotas y confirmación completa: número de cuotas, valor por cuota, fecha de inicio y medio de pago.
+- Devuelve: resumen, hallazgos[], fraude.alertas[].
 `.trim()
 };
 
@@ -227,7 +233,8 @@ Analiza la llamada "Abono".
   if ($tipiField) $tipiField.style.display = 'none';
 
   const TIPIS_BY_CAMPAIGN = {
-    'Carteras Propias': ['Novación', 'Propuesta de pago', 'Abono']
+    // <<< AGREGO "Acuerdo a cuotas" >>>
+    'Carteras Propias': ['Novación', 'Propuesta de pago', 'Abono', 'Acuerdo a cuotas']
   };
 
   const fillTipisForCampaign = () => {
@@ -454,7 +461,11 @@ function renderBatchResults(result) {
     const afectadosCriticos = pick(consolidado, 'afectadosCriticos') || pick(analisis, 'afectadosCriticos') || pick(meta, 'afectadosCriticos') || [];
     const noAplican = pick(consolidado, 'noAplican') || pick(analisis, 'noAplican') || pick(meta, 'noAplican') || [];
 
-    // 🔴 NUEVO: fraude individual en SSE
+    // NUEVO: campaña y tipificación desde metadata (si viene)
+    const campania = pick(meta, 'metadata.campania') || pick(meta, 'campania') || '';
+    const tipificacion = pick(meta, 'metadata.tipificacion') || pick(meta, 'tipificacion') || '';
+
+    // NUEVO: fraude individual en SSE
     const fraude = (pick(analisis, 'fraude.alertas') || []).map(formatFraudItem);
 
     const porAtrib = flattenPorAtrib(meta);
@@ -474,10 +485,10 @@ function renderBatchResults(result) {
     det.innerHTML = `
       <summary><b>${escapeHtml(agente)}</b> — ${escapeHtml(cliente)} · <span class="pill">Nota: ${nota}</span> · <small>${escapeHtml(callId)}</small></summary>
       <div style="padding:8px 12px">
+        ${campania || tipificacion ? `<p><b>Campaña:</b> ${escapeHtml(campania || '—')} · <b>Tipificación:</b> ${escapeHtml(tipificacion || '—')}</p>` : ''}
         <p><b>Resumen:</b> ${resumen ? escapeHtml(resumen) : '(sin resumen)'}</p>
         <p><b>Hallazgos:</b></p>
         <ul>${(hallazgos || []).map(h => `<li>${escapeHtml(h)}</li>`).join('') || '<li>—</li>'}</ul>
-        <!-- 🔴 NUEVO: bloque fraude individual -->
         ${fraude.length ? `<p><b>Alertas de fraude:</b></p><ul>${fraude.map(x => `<li>${x}</li>`).join('')}</ul>` : ''}
         <p><b>Afectados críticos:</b></p>
         <ul>${(arr(afectadosCriticos).length ? arr(afectadosCriticos).map(a => `<li>${escapeHtml(a)}</li>`).join('') : '<li>—</li>')}</ul>
@@ -499,7 +510,7 @@ function renderBatchResults(result) {
   setTextById('grpCrit',   Array.isArray(critGroup) ? critGroup.join(', ') : '—');
   setTextById('grpPlan',   g.planMejora || '');
 
-  // 🔴 NUEVO: fraude (grupo) calculado desde items si no viene en g
+  // NUEVO: fraude (grupo) calculado desde items si no viene en g
   const fraudesGrupo = [];
   items.forEach(it => {
     const arr = pick(it, 'meta.analisis.fraude.alertas') || [];
