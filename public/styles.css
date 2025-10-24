@@ -173,3 +173,23 @@ textarea:focus-visible{
   display:inline-block;
   margin-right:6px;
 }
+/* === Resumen grupal completo === */
+.group-summary {
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  padding: 16px 20px;
+  background: #fff;
+}
+.group-summary h4 { margin: 12px 0 6px; font-weight: 600; }
+.affected-list, #grpHall, .fraud-list {
+  margin: 0;
+  padding-left: 22px; /* evita que los bullets queden pegados al borde */
+}
+.fraud-box {
+  margin-top: 14px;
+  border: 1px dashed #e11d48;
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: #fff7f7;
+}
+.fraud-title { font-weight: 600; margin-bottom: 6px; }

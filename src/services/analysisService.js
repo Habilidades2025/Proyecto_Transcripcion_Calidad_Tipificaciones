@@ -68,11 +68,14 @@ const TIPI_RULES = {
   'acuerdo de pago': `
 - Si hay acuerdo, extrae monto(s), fecha(s) y canal oficial. Si no se cierra, marca "negociacion_en_proceso".`.trim(),
 
-  // estos se inyectan dinámicamente por campaña:
+  // se inyectan dinámicamente por campaña:
   'novacion': '',
   'propuesta de pago': '',
   'abono': '',
-  'acuerdo a cuotas': '' 
+  'pago a cuotas': '',
+  // NUEVO: placeholders para tipis nuevas
+  'posible negociación': '',
+  'renuentes': ''
 };
 
 /** Normaliza tipificación para indexar TIPI_RULES */
@@ -112,45 +115,79 @@ const ABONO_ITEMS = [
   '8. Utiliza vocabulario prudente y respetuoso'
 ];
 
-/** Acuerdo a cuotas — 11 ítems centrados en condiciones del plan */
-const ACUERDO_CUOTAS_ITEMS = [
-  '1. Informa beneficios y consecuencias de aceptar el acuerdo a cuotas',
-  '2. Confirma condiciones completas (número de cuotas, valor por cuota, fecha de inicio y canal oficial)',
-  '3. Indaga motivo por el cual el titular requiere pago en cuotas',
+/** Pago a cuotas — (mismos ítems que usabas para "Acuerdo a cuotas") */
+const PAGO_CUOTAS_ITEMS = [
+  '1. Informa beneficios y consecuencias de no pago',
+  '2. Realiza proceso completo de confirmación de la negociación',
+  '3. Indaga motivo del no pago',
   '4. Solicita autorización para contacto por otros medios',
   '5. Despedida según guion establecido',
-  '6. Explica correctamente condiciones del plan (cuotas, fechas, posibles intereses/condiciones)',
-  '7. Gestiona objeciones con argumentos claros acorde a políticas',
+  '6. Ofrece alternativas acordes a la realidad del cliente y políticas vigentes',
+  '7. Debate objeciones según situación del cliente',
   '8. Informa que la llamada es grabada y monitoreada (Ley 1581)',
-  '9. Usa el guion completo establecido por la campaña',
-  '10. Evita argumentos engañosos o coercitivos',
+  '9. Usa guion completo establecido por la campaña',
+  '10. Evita argumentos engañosos con el cliente',
   '11. Utiliza vocabulario prudente y respetuoso'
 ];
 
 const NOVACION_ITEMS = [
-  '1. Informa beneficios y consecuencias de aceptar la novación',
-  '2. Realiza proceso completo de confirmación de la novación (monto, cuotas, tasa y plazos)',
-  '3. Indaga motivo por el cual el titular requiere la novación',
+  '1. Informa beneficios y consecuencias de no pago',
+  '2. Realiza proceso completo de confirmación de la negociación',
+  '3. Indaga motivo del no pago',
   '4. Solicita autorización para contacto por otros medios',
   '5. Despedida según guion establecido',
-  '6. Explica correctamente condiciones del nuevo crédito (cuotas, tasas, beneficios)',
-  '7. Gestiona objeciones sobre tasa o plazo con argumentos claros',
-  '8. Informa grabación y monitoreo conforme Ley 1581',
-  '9. Usa el guion completo establecido para novación',
-  '10. Evita argumentos engañosos o coercitivos',
+  '6. Ofrece alternativas acordes a la realidad del cliente y políticas vigentes',
+  '7. Debate objeciones según situación del cliente',
+  '8. Informa que la llamada es grabada y monitoreada (Ley 1581)',
+  '9. Usa guion completo establecido por la campaña',
+  '10. Evita argumentos engañosos con el cliente',
+  '11. Utiliza vocabulario prudente y respetuoso'
+];
+
+const POSIBLENEG_ITEMS = [
+  '1. Informa beneficios y consecuencias de no pago',
+  '2. Indaga motivo del no pago',
+  '3. Solicita autorización para contacto por otros medios',
+  '4. Despedida según guion establecido',
+  '5. Ofrece alternativas acordes a la realidad del cliente y políticas vigentes',
+  '6. Debate objeciones según situación del cliente',
+  '7. Informa que la llamada es grabada y monitoreada (Ley 1581)',
+  '8. Usa guion completo establecido por la campaña',
+  '9. Evita argumentos engañosos con el cliente',
+  '10. Utiliza vocabulario prudente y respetuoso'
+];
+
+const RENUENTES_ITEMS = [
+  '1. Informa beneficios y consecuencias de no pago',
+  '2. Realiza proceso completo de confirmación de la negociación',
+  '3. Indaga motivo del no pago',
+  '4. Solicita autorización para contacto por otros medios',
+  '5. Despedida según guion establecido',
+  '6. Ofrece alternativas acordes a la realidad del cliente y políticas vigentes',
+  '7. Debate objeciones según situación del cliente',
+  '8. Informa que la llamada es grabada y monitoreada (Ley 1581)',
+  '9. Usa guion completo establecido por la campaña',
+  '10. Evita argumentos engañosos con el cliente',
   '11. Utiliza vocabulario prudente y respetuoso'
 ];
 
 /* =============== Prompts específicos por caso =============== */
+// Reemplaza tu strictEvidenceBlock() por este:
 function strictEvidenceBlock() {
   return `
 REGLA DE EVIDENCIA (muy estricta):
-• Para marcar **cumplido=true** en un ítem, la "justificacion" DEBE incluir **una cita textual entre comillas** extraída de la transcripción (≈8+ palabras) y, si existe, el tiempo aproximado (“00:38”).
+• Para marcar **cumplido=true** en un ítem, la "justificacion" DEBE incluir **cita literal** (≈8+ palabras) y, si existe, el tiempo (“00:38”).
 • Si **no hay cita literal**, escribe "no_evidencia" y pon **cumplido=false**.
-• Frases genéricas (“sí, correcto”, “perfecto”, “quedo pendiente por WhatsApp”) **no valen** como evidencia.
-• No infieras ni parafrasees sin cita: ante duda, **no_evidencia**.
+• Frases genéricas (“sí, correcto”, “perfecto”) **no valen** como evidencia.
+• No infieras ni parafrasees: ante duda, **no_evidencia**.
+
+REGLAS DE VALIDACIÓN ESPECÍFICAS:
+• “Indaga motivo del no pago”: la cita debe ser **la pregunta del agente** (p.ej., “¿Cuál es el motivo…?”, “¿Por qué no ha podido…?”, “¿Qué le impidió…?”). Si la justificación es solo una **respuesta del cliente** o una **preocupación** del cliente → **no_evidencia**.
+• “Ley 1581”: la cita debe contener **“1581”** o una mención explícita a **protección/tratamiento de datos** + “ley”. “Llamada grabada” sin “1581” **no es suficiente**.
+• “Autorización para otros medios”: la evidencia debe mostrar **pregunta de autorización** y **aceptación del cliente**. Pedir “envíe el soporte por WhatsApp” **no es autorización**.
 `.trim();
 }
+
 
 /* --- Novación (Carteras Propias) --- */
 function buildNovacionExtraPrompt() {
@@ -206,28 +243,19 @@ ${PP_ITEMS.map(s => `- ${s}`).join('\n')}
 
 REGLA ESPECÍFICA — DESPEDIDA SEGÚN GUION (ítem 5):
 • Para **cumplir**, en la **parte final** de la llamada (último 25% del tiempo) debe existir una despedida que contenga al menos **dos** de estos tres elementos:
-  1) **Identificación del agente + empresa** en una forma cercana al guion:
-     - Variantes válidas: "Habló con/Le habló Soy [Nombre] de Contacto Solution(s)/Novartec".
-     - Se acepta solo el **nombre** o primer nombre del agente.
-  2) **Agradecimiento**: “gracias”, “muchas gracias”, “agradezco su atención/tiempo”.
-  3) **Buen deseo**: “feliz día/tarde/noche”, “que esté muy bien”, “un excelente día”.
-• Ejemplos que **sí cumplen**:
-  - "Le habló Ana de Contacto Solutions, muchas gracias, feliz día."
-  - "Soy Juan de Novartec, gracias por su tiempo, un excelente día."
-• Ejemplos que **NO cumplen**:
-  - Solo “gracias, hasta luego” (sin empresa ni buen deseo).
-  - Menciones sueltas de la empresa en medio de la llamada que no formen la despedida.
+  1) **Identificación del agente + empresa** en una forma cercana al guion (ej.: "Habló con/Le habló... Soy [Nombre] de Contacto Solutions/Novartec").
+  2) **Agradecimiento** (gracias/agradezco su tiempo).
+  3) **Buen deseo** (feliz día/que esté muy bien).
 • La **justificación** debe citar literalmente la frase de cierre (con hora aproximada). Si no hay evidencia suficiente → **cumplido=false** para el ítem 5.
 
 ACLARACIONES:
-- En (2) “confirmación completa de la negociación”, para **cumplir** exige confirmación **explícita** de monto **y** fecha **y** medio oficial de pago. Si falta cualquiera → **no cumple**.
-- En (6) alternativas, valida que sean acordes a la realidad del cliente y a políticas vigentes.
+- En (2) “confirmación completa de la negociación”, exige confirmación **explícita** de monto **y** fecha **y** medio oficial. Si falta cualquiera → **no cumple**.
 
 CÁLCULO DE NOTA (binaria):
 • Solo ítems con "aplica": true.
 • Si **alguno** aplicable es "cumplido=false" → **notaFinal = 0**.
 • Si **todos** los aplicables son "cumplido=true" → **notaFinal = 100**.
-• Si nada aplica, **notaFinal = 100** (no penaliza).
+• Si nada aplica, **notaFinal = 100**.
 
 FRAUDE:
 • Canales NO oficiales de pago → "cuenta_no_oficial".
@@ -239,18 +267,17 @@ FRAUDE:
 function buildAbonoExtraPrompt() {
   return `
 EVALUACIÓN ESPECÍFICA — ABONO (Carteras Propias)
-Definición (operativa): **ABONO** es cuando el cliente se **compromete a realizar un pago parcial** (no liquida la totalidad) **sobre un ACUERDO VIGENTE**, con el fin explícito de **no perder dicho acuerdo ni sus beneficios** (p. ej., descuento, condiciones pactadas).
+Definición (operativa): **ABONO** es cuando el cliente se **compromete a realizar un pago parcial** (no liquida la totalidad) **sobre un ACUERDO VIGENTE**, con el fin explícito de **no perder dicho acuerdo ni sus beneficios**.
 
 DECISIÓN PREVIA (clasificación antes de puntuar):
-• Marca **"abono.aceptado": true** SOLO si se cumplen ambos criterios en la transcripción:
-  A) **Existe ACUERDO VIGENTE** (evidencia textual de “acuerdo/negociación/compromiso vigente”, “para no perder el acuerdo/descuento/beneficio”, “mantener el acuerdo”, etc.).
-  B) **Compromiso de PAGO PARCIAL** por parte del cliente (el cliente dice que hará un **abono**/pago parcial). Idealmente con **monto** y/o **fecha** y, si aparece, **canal oficial**.
-  — Nota: Si el cliente habla de pagar **todo** o cerrar la obligación completa, eso corresponde a **Propuesta de pago** (no ABONO).
+• Marca **"abono.aceptado": true** SOLO si se cumplen ambos:
+  A) **Existe ACUERDO VIGENTE** (verificable).
+  B) **Compromiso de PAGO PARCIAL** (“abono/pago parcial”). Ideal si hay **monto**/**fecha** y, si aparece, **canal oficial**.
 
 • Si **NO** se cumplen A y B:
   - "abono.aceptado": false
   - "abono.motivo_no_aplica": "No aplica — sin evidencia de acuerdo vigente y/o sin compromiso de pago parcial (abono)."
-  - En "consolidado.porAtributo": marca todos los ítems con "aplica": false
+  - En "consolidado.porAtributo": marca todos "aplica": false
   - "consolidado.notaFinal": 0
   - FIN.
 
@@ -259,16 +286,11 @@ ${strictEvidenceBlock()}
 ÍTEMS CRÍTICOS (peso 100% si aplica):
 ${ABONO_ITEMS.map(s => `- ${s}`).join('\n')}
 
-ACLARACIONES DE EVIDENCIA PARA ABONO:
-• El carácter **parcial** debe quedar claro (citas como: “haré un abono”, “pago parcial”, “no puedo pagar todo pero realizo un abono”, etc.).
-• El **acuerdo vigente** debe mencionarse de forma explícita o implícita verificable (citas como: “para no perder el acuerdo/descuento/beneficio”, “mantener el acuerdo que tengo”, “con el convenio/negociación actual”, etc.).
-• Si hay **monto y/o fecha** y **canal oficial**, inclúyelos en la justificación cuando corresponda; si faltan, no los inventes.
-
 CÁLCULO DE NOTA (binaria):
 • Considera solo ítems con "aplica": true.
 • Si **alguno** aplicable tiene "cumplido": false → **notaFinal = 0**.
 • Si **todos** los aplicables tienen "cumplido": true → **notaFinal = 100**.
-• Si ningún ítem aplica (caso raro manteniendo A y B), notaFinal = 100 (no penaliza).
+• Si ningún ítem aplica, notaFinal = 100.
 
 FRAUDE:
 • Señala "cuenta_no_oficial" cuando se pida consignar/transferir a canal NO oficial.
@@ -276,38 +298,129 @@ FRAUDE:
 `.trim();
 }
 
-/* --- Acuerdo a cuotas (Carteras Propias) --- */
-function buildAcuerdoCuotasExtraPrompt() {
+/* --- Pago a cuotas (antes “Acuerdo a cuotas”) --- */
+function buildPagoCuotasExtraPrompt() {
   return `
-EVALUACIÓN ESPECÍFICA — ACUERDO A CUOTAS (Carteras Propias)
-Definición: el cliente **acepta un plan de pagos fraccionado** (acuerdo a cuotas) para cumplir su obligación, con **número de cuotas**, **valor por cuota**, **fecha de inicio** y (si aparece) **canal oficial**.
+EVALUACIÓN ESPECÍFICA — PAGO A CUOTAS (Carteras Propias)
+Definición: el cliente acepta un **plan en cuotas** con **número de cuotas**, **valor por cuota**, **fecha de inicio** y (si aparece) **canal oficial** de pago.
 
 DECISIÓN PREVIA:
-• Si **NO** hay aceptación formal del acuerdo a cuotas (no se evidencia intención real de pagar mediante cuotas o no se confirma el esquema):
-  - "acuerdo_cuotas.aceptado": false
-  - "acuerdo_cuotas.motivo_no_aplica": "No aplica — sin aceptación formal del acuerdo a cuotas."
+• Si **NO** hay aceptación formal del plan en cuotas:
+  - "pago_cuotas.aceptado": false
+  - "pago_cuotas.motivo_no_aplica": "No aplica — sin aceptación formal del pago a cuotas."
   - Marca todos los ítems con "aplica": false
   - "consolidado.notaFinal": 0
   - FIN.
 
 ${strictEvidenceBlock()}
 
-ÍTEMS CRÍTICOS (peso 100% si aplica):
-${ACUERDO_CUOTAS_ITEMS.map(s => `- ${s}`).join('\n')}
+REGLAS POR ÍTEM (deben cumplirse con citas):
+1) Beneficios y consecuencias: citar ≥1 beneficio **y** ≥1 consecuencia. Falta cualquiera → **no cumple**.
+2) Confirmación completa de la negociación: exige **número de cuotas + valor por cuota + primera fecha + canal oficial**; sin los cuatro → **no cumple**.
+3) Indaga motivo de no pago: pregunta **abierta** o exploración clara de causa.
+4) Autorización para otros medios: evidencia explícita de autorización.
+5) Despedida según guion: ver definiciones arriba.
+6) Alternativas acordes a política: opciones reales y coherentes con la situación del cliente.
+7) Manejo de objeciones: solo **aplica=true** si hubo objeciones; si **no hubo**, marca **aplica=false** (no penaliza).
+8) Ley 1581: debe verse **“1581”** en la cita del agente.
+9) Guion completo: debe quedar explícito que **solo se recauda a cuentas empresariales** y/o se mencionan **canales oficiales** (PSE, link de pago, portal, oficinas autorizadas). Sin eso → **no cumple**.
+10) Evita argumentos engañosos: no prometer condonaciones/beneficios inexistentes.
+11) Vocabulario prudente y respetuoso.
 
-ACLARACIONES:
-• Para **cumplir** el ítem 2 (confirmación completa) exige mención explícita de: **número de cuotas**, **valor por cuota**, **fecha de inicio** y **canal oficial** (si no están todos → **no cumple**).
-• Valida que las explicaciones y objeciones estén **acordes a políticas vigentes**.
+ÍTEMS CRÍTICOS (peso 100% si aplica):
+${PAGO_CUOTAS_ITEMS.map(s => `- ${s}`).join('\n')}
+
+CÁLCULO DE NOTA:
+• Solo ítems con "aplica": true.
+• Si algún aplicable queda "cumplido=false" → **notaFinal = 0**.
+• Si todos los aplicables quedan "cumplido=true" → **notaFinal = 100**.
+• Si nada aplica → **100** (no penaliza).
+`.trim();
+}
+
+// Reemplaza tu buildPosibleNegociacionExtraPrompt() por este:
+function buildPosibleNegociacionExtraPrompt() {
+  return `
+EVALUACIÓN — POSIBLE NEGOCIACIÓN (Carteras Propias)
+Definición: el cliente muestra **disposición** a negociar/recibir información pero **sin** compromiso formal (no hay monto/fecha/medio cerrados).
+
+DECISIÓN PREVIA:
+• Si **NO** hay señales claras de posible negociación:
+  - "posible_negociacion.aplica": false
+  - "posible_negociacion.motivo_no_aplica": "No aplica — sin posible negociación."
+  - Marca todos los ítems con "aplica": false
+  - "consolidado.notaFinal": 0
+  - FIN.
+
+${strictEvidenceBlock()}
+
+VOCABULARIO VÁLIDO (beneficios/consecuencias):
+• Beneficios (ejemplos aceptables): **descuento**, **condonación de intereses/mora**, **normalización del crédito**, **evitar reporte negativo**, **reactivación del servicio**, **acceso a acuerdos/planes**.
+• Consecuencias (ejemplos aceptables): **reporte en centrales**, **proceso jurídico/embargos**, **incremento de intereses/cargos por mora**, **bloqueo/cancelación del producto**.
+• **No válido** para #1: miedos o noticias (**“estafa”, “publicación”**) y cualquier frase que no sea un beneficio/consecuencia **de no pago**.
+
+REGLAS POR ÍTEM:
+1) **Beneficios y consecuencias**: exige ≥1 beneficio **y** ≥1 consecuencia del listado anterior, con **citas literales**. Si solo hay temores/estafa → **no cumple**.
+2) **Indaga motivo del no pago**: debe existir **pregunta abierta del agente** (cita literal). Respuestas o preocupaciones del cliente **no reemplazan** la pregunta → si no está, **no cumple**.
+3) **Autorización otros medios**: evidencia de **pregunta de autorización** + **aceptación**. “Envíe el soporte por WhatsApp” **NO** es autorización.
+4) **Despedida (guion)**: en el **tramo final** (último 25% de la llamada) debe contener al menos **2 de 3**:
+   a) **Identificación agente + empresa** con variantes flexibles: “Le habló… / Habló con… / Soy… / **Recuerde que habló con** [Nombre] de **Contacto Solution(s)/Novartec**”.
+   b) **Agradecimiento** (“gracias”, “agradezco su tiempo”).
+   c) **Buen deseo** (“feliz día/tarde/noche”, “que esté muy bien”).
+   Solo “buen deseo” **no basta**.
+7) **Ley 1581**: debe mencionarse el **número 1581** o frase equivalente de protección/tratamiento de datos **con** mención de ley. Citas que hablen de bancos/tuya/consulta de crédito **no cuentan**.
+8) **Uso del guion (canales oficiales)**: valida **exclusivamente** que el agente aclare que **se recauda únicamente por cuentas/canales corporativos/empresariales** (variantes válidas):
+   - “se recauda únicamente a cuentas **empresariales/corporativas**”,
+   - “**Novartec/Contacto Solutions** recauda solo a nombre de la compañía”,
+   - “**En Novarte de Contacto Solutions solamente generan recaudo para obligaciones pendientes a nombre de la compañía**” (aceptar esta variación).
+6/7) **Objeciones**: 
+   - Si **no** hubo objeciones del cliente, marca el ítem “Debate objeciones…” como **aplica=false** **y** **cumplido=true** (no penaliza).
+   - Si hubo objeción, el agente debe responder **acorde a la necesidad** y a política (cita literal).
+
+ÍTEMS CRÍTICOS (peso 100% si aplica):
+${POSIBLENEG_ITEMS.map(s => `- ${s}`).join('\n')}
 
 CÁLCULO DE NOTA (binaria):
 • Solo ítems con "aplica": true.
-• Si **alguno** aplicable es "cumplido=false" → **notaFinal = 0**.
-• Si **todos** los aplicables son "cumplido=true" → **notaFinal = 100**.
-• Si nada aplica, **notaFinal = 100** (no penaliza).
+• Falla cualquiera aplicable → **0**. Todos cumplen → **100**. Si nada aplica → **100**.
 
 FRAUDE:
 • Canales NO oficiales de pago → "cuenta_no_oficial".
-• Contactos NO oficiales (número personal/WhatsApp) → "contacto_numero_no_oficial".
+• Números o WhatsApp **personales** → "contacto_numero_no_oficial" (incluye 10 dígitos asociados a “WhatsApp”).
+`.trim();
+}
+
+/* --- Renuentes (Carteras Propias) --- */
+function buildRenuenteExtraPrompt() {
+  return `
+EVALUACIÓN — CLIENTE RENUENTE (Carteras Propias)
+Definición: el titular **evita** comprometerse (resistencia activa/pasiva). Objetivo: reducir resistencia y abrir camino a la negociación.
+
+DECISIÓN PREVIA:
+• Si el cliente **no** muestra renuencia (colabora normalmente):
+  - "renuente.aplica": false
+  - "renuente.motivo_no_aplica": "No aplica — sin señales de renuencia."
+  - Marca todos los ítems "aplica": false
+  - "consolidado.notaFinal": 0
+  - FIN.
+
+${strictEvidenceBlock()}
+
+APLICABILIDAD Y REGLAS:
+• Ítem 2 (proceso completo de confirmación): normalmente **no aplica** (no hay cierre). Sólo **aplica=true** si realmente se cierra negociación.
+• Ítem 6 (alternativas) y 7 (objeciones): 
+  - **aplica=true** si el agente propone opciones reales / gestiona objeciones; 
+  - si **no** se presentan, **aplica=false**.
+• El resto (1,3,4,5,8,9,10,11) se evalúa idéntico a Pago a cuotas (mismas evidencias y citas).
+
+ÍTEMS CRÍTICOS:
+${RENUENTES_ITEMS.map(s => `- ${s}`).join('\n')}
+
+CÁLCULO DE NOTA (binaria):
+• Solo ítems con "aplica": true.
+• Falla cualquiera aplicable → **0**. Todos cumplen → **100**. Si nada aplica → **100**.
+
+FRAUDE (mismo umbral estricto del bloque de evidencia).
 `.trim();
 }
 
@@ -340,8 +453,6 @@ function computeBinaryScore(porAtrib = [], accepted = true) {
 }
 
 function ensureBlock(list, _labels) {
-  // Si el modelo no devolvió todos los ítems, no forzamos completarlos,
-  // pero sí mantenemos lo recibido consistente.
   return normalizePorAtributo(Array.isArray(list) ? list : []);
 }
 
@@ -352,7 +463,6 @@ function ensureConsolidadoForType(analisis = {}, type) {
   if (type === 'novacion') {
     accepted = analisis?.novacion?.aceptada !== false;
     rawPorAttr = analisis?.consolidado?.porAtributo;
-    // Garantiza fraude si explícitamente no aceptada
     if (analisis?.novacion && analisis.novacion.aceptada === false) {
       const list = Array.isArray(analisis?.fraude?.alertas) ? analisis.fraude.alertas : [];
       const has = list.some(a => a?.tipo === 'novacion_invalida');
@@ -376,8 +486,18 @@ function ensureConsolidadoForType(analisis = {}, type) {
     rawPorAttr = analisis?.consolidado?.porAtributo;
   }
 
-  if (type === 'acuerdo_cuotas') {
-    accepted = analisis?.acuerdo_cuotas?.aceptado !== false;
+  if (type === 'pago_cuotas') {
+    accepted = analisis?.pago_cuotas?.aceptado !== false;
+    rawPorAttr = analisis?.consolidado?.porAtributo;
+  }
+
+  if (type === 'posible_negociacion') {
+    accepted = analisis?.posible_negociacion?.aplica !== false;
+    rawPorAttr = analisis?.consolidado?.porAtributo;
+  }
+
+  if (type === 'renuente') {
+    accepted = analisis?.renuente?.aplica !== false;
     rawPorAttr = analisis?.consolidado?.porAtributo;
   }
 
@@ -415,9 +535,11 @@ export async function analyzeTranscriptSimple({
   const isNovacionCP       = isCP && (tipKey === 'novacion' || tipKey === 'novación');
   const isPropuestaPagoCP  = isCP && (tipKey === 'propuesta de pago' || tipKey === 'propuesta_pago');
   const isAbonoCP          = isCP && (tipKey === 'abono');
-  const isAcuerdoCuotasCP  = isCP && (tipKey === 'acuerdo a cuotas' || tipKey === 'acuerdo_a_cuotas' || tipKey === 'acuerdo cuotas');
+  const isPagoCuotasCP  = isCP && (tipKey === 'pago a cuotas' || tipKey === 'pago_a_cuotas' || tipKey === 'pago cuotas');
+  const isPosibleNegociacionCP = isCP && (tipKey === 'posible negociacion' || tipKey === 'posible_negociacion');
+  const isRenuentesCP          = isCP && (tipKey === 'renuentes' || tipKey === 'renuente' || tipKey === 'cliente renuente' || tipKey === 'cliente_renuente');
 
-  // ---- System prompt (siempre con canales oficiales para marcar fraude) ----
+  // ---- System prompt ----
   const system = `
 Eres un analista de calidad experto en Contact Center. Evalúas transcripciones y devuelves JSON ESTRICTO en español, **sin texto adicional**.
 No inventes datos. Si algo no aparece en la transcripción, indícalo como "no_evidencia".
@@ -427,10 +549,12 @@ Marca alertas de FRAUDE si el agente pide consignar/transferir a canal NO oficia
 
   // ---- Extra prompt específico por tipificación/campaña ----
   let extraTip = (TIPI_RULES[tipKey] || '');
-  if (isNovacionCP)       extraTip = buildNovacionExtraPrompt();
-  if (isPropuestaPagoCP)  extraTip = buildPropuestaPagoExtraPrompt();
-  if (isAbonoCP)          extraTip = buildAbonoExtraPrompt();
-  if (isAcuerdoCuotasCP)  extraTip = buildAcuerdoCuotasExtraPrompt();
+  if (isNovacionCP)             extraTip = buildNovacionExtraPrompt();
+  if (isPropuestaPagoCP)        extraTip = buildPropuestaPagoExtraPrompt();
+  if (isAbonoCP)                extraTip = buildAbonoExtraPrompt();
+  if (isPagoCuotasCP)           extraTip = buildPagoCuotasExtraPrompt();
+  if (isPosibleNegociacionCP)   extraTip = buildPosibleNegociacionExtraPrompt();
+  if (isRenuentesCP)            extraTip = buildRenuenteExtraPrompt();
 
   // ---- Instrucciones de salida (JSON) ----
   const commonJsonShape = `
@@ -535,19 +659,72 @@ Marca alertas de FRAUDE si el agente pide consignar/transferir a canal NO oficia
 }
 `.trim();
 
-  const acuerdoCuotasJsonShape = `
+  const pagoCuotasJsonShape = `
 {
   "agent_name": "string (si no hay evidencia, \\"\\")",
   "client_name": "string (si no hay evidencia, \\"\\")",
   "resumen": "100-150 palabras (condiciones del plan en cuotas, legalidad 1581/1266, objeciones, cierre y tono)",
   "hallazgos": ["3-6 bullets operativos y específicos sobre lo que sí aparece"],
   "sugerencias_generales": ["2-4 puntos accionables de mejora"],
-  "flags": { "acuerdo_cuotas_aceptado": true, "ley_1581_mencionada": true, "hubo_objeciones": true, "despedida_adecuada": true },
-  "acuerdo_cuotas": { "aceptado": true, "motivo_no_aplica": "" },
+  "flags": { "pago_cuotas_aceptado": true, "ley_1581_mencionada": true, "hubo_objeciones": true, "despedida_adecuada": true },
+  "pago_cuotas": { "aceptado": true, "motivo_no_aplica": "" },
   "consolidado": {
     "notaFinal": 0,
     "porAtributo": [
-      ${ACUERDO_CUOTAS_ITEMS.map(t =>
+      ${PAGO_CUOTAS_ITEMS.map(t =>
+        `{"atributo":"${t.replace(/"/g, '\\"')}","aplica":true,"cumplido":true,"justificacion":"","mejora":""}`
+      ).join(',\n      ')}
+    ]
+  },
+  "fraude": {
+    "alertas": [
+      { "tipo": "cuenta_no_oficial|contacto_numero_no_oficial|otro", "cita": "frase breve", "riesgo": "alto|medio|bajo" }
+    ],
+    "observaciones": "string"
+  }
+}
+`.trim();
+
+  // NUEVO — Shapes para Posible negociación y Renuentes
+  const posibleNegJsonShape = `
+{
+  "agent_name": "string (si no hay evidencia, \\"\\")",
+  "client_name": "string (si no hay evidencia, \\"\\")",
+  "resumen": "100-150 palabras (señales de disposición, exploración de motivo, alternativas sin comprometer, trazabilidad y tono)",
+  "hallazgos": ["3-6 bullets operativos y específicos sobre lo que sí aparece"],
+  "sugerencias_generales": ["2-4 puntos accionables de mejora"],
+  "flags": { "posible_negociacion_detectada": true, "ley_1581_mencionada": true, "hubo_objeciones": true, "despedida_adecuada": true },
+  "posible_negociacion": { "aplica": true, "motivo_no_aplica": "" },
+  "consolidado": {
+    "notaFinal": 0,
+    "porAtributo": [
+      ${POSIBLENEG_ITEMS.map(t =>
+        `{"atributo":"${t.replace(/"/g, '\\"')}","aplica":true,"cumplido":true,"justificacion":"","mejora":""}`
+      ).join(',\n      ')}
+    ]
+  },
+  "fraude": {
+    "alertas": [
+      { "tipo": "cuenta_no_oficial|contacto_numero_no_oficial|otro", "cita": "frase breve", "riesgo": "alto|medio|bajo" }
+    ],
+    "observaciones": "string"
+  }
+}
+`.trim();
+
+  const renuentesJsonShape = `
+{
+  "agent_name": "string (si no hay evidencia, \\"\\")",
+  "client_name": "string (si no hay evidencia, \\"\\")",
+  "resumen": "100-150 palabras (tipo de resistencia, control emocional, reformulación, valor/beneficios, trazabilidad y tono)",
+  "hallazgos": ["3-6 bullets operativos y específicos sobre lo que sí aparece"],
+  "sugerencias_generales": ["2-4 puntos accionables de mejora"],
+  "flags": { "cliente_renuente": true, "ley_1581_mencionada": true, "hubo_objeciones": true, "despedida_adecuada": true },
+  "renuente": { "aplica": true, "motivo_no_aplica": "" },
+  "consolidado": {
+    "notaFinal": 0,
+    "porAtributo": [
+      ${RENUENTES_ITEMS.map(t =>
         `{"atributo":"${t.replace(/"/g, '\\"')}","aplica":true,"cumplido":true,"justificacion":"","mejora":""}`
       ).join(',\n      ')}
     ]
@@ -573,10 +750,12 @@ ${String(transcript || '').slice(0, Number(process.env.ANALYSIS_MAX_INPUT_CHARS)
 
 Devuelve SOLO este JSON:
 ${
-  isNovacionCP       ? novacionJsonShape      :
-  isPropuestaPagoCP  ? propuestaJsonShape     :
-  isAbonoCP          ? abonoJsonShape         :
-  isAcuerdoCuotasCP  ? acuerdoCuotasJsonShape :
+  isNovacionCP             ? novacionJsonShape        :
+  isPropuestaPagoCP        ? propuestaJsonShape       :
+  isAbonoCP                ? abonoJsonShape           :
+  isPagoCuotasCP           ? pagoCuotasJsonShape      :
+  isPosibleNegociacionCP   ? posibleNegJsonShape      :
+  isRenuentesCP            ? renuentesJsonShape       :
   commonJsonShape
 }
 `.trim();
@@ -610,15 +789,21 @@ ${
     novacion: json?.novacion,
     propuesta_pago: json?.propuesta_pago,
     abono: json?.abono,
+    pago_cuotas: json?.pago_cuotas,
+    posible_negociacion: json?.posible_negociacion,  // NUEVO
+    renuente: json?.renuente,                        // NUEVO
+    // compat histórico por si algo aguas arriba aún lee acuerdo_cuotas
     acuerdo_cuotas: json?.acuerdo_cuotas,
     consolidado: json?.consolidado
   };
 
   // ---- Post-proceso por caso para nota 100/0 y afectados críticos
-  if (isNovacionCP)       analisis = ensureConsolidadoForType(analisis, 'novacion');
-  if (isPropuestaPagoCP)  analisis = ensureConsolidadoForType(analisis, 'propuesta_pago');
-  if (isAbonoCP)          analisis = ensureConsolidadoForType(analisis, 'abono');
-  if (isAcuerdoCuotasCP)  analisis = ensureConsolidadoForType(analisis, 'acuerdo_cuotas');
+  if (isNovacionCP)             analisis = ensureConsolidadoForType(analisis, 'novacion');
+  if (isPropuestaPagoCP)        analisis = ensureConsolidadoForType(analisis, 'propuesta_pago');
+  if (isAbonoCP)                analisis = ensureConsolidadoForType(analisis, 'abono');
+  if (isPagoCuotasCP)           analisis = ensureConsolidadoForType(analisis, 'pago_cuotas');
+  if (isPosibleNegociacionCP)   analisis = ensureConsolidadoForType(analisis, 'posible_negociacion');
+  if (isRenuentesCP)            analisis = ensureConsolidadoForType(analisis, 'renuente');
 
   // --- Compatibilidad para renderizadores MD antiguos (aliases planos)
   analisis.afectadosCriticos = Array.isArray(analisis?.consolidado?.afectadosCriticos)

@@ -189,6 +189,7 @@ const $grpTotal   = $('grpTotal');
 const $grpAvg     = $('grpAvg');
 const $grpResumen = $('grpResumen');
 const $grpHall    = $('grpHall');
+// ATENCIÓN: grpCrit debe ser un <ul id="grpCrit"> en HTML (ver sección HTML abajo)
 const $grpCrit    = $('grpCrit');
 const $grpPlan    = $('grpPlan');
 
@@ -202,24 +203,27 @@ const TIPI_PROMPTS = {
 Analiza la llamada "Novación".
 - Detecta si el cliente ya pagó o pagará: intención real, fecha y (si existe) monto y canal oficial.
 - Si faltan datos (monto/fecha/canal), marca "no_evidencia".
-- Devuelve: resumen (100-150 palabras), hallazgos[], fraude.alertas[].
-`.trim(),
+- Devuelve: resumen (100-150 palabras), hallazgos[], fraude.alertas[].`.trim(),
   'Propuesta de pago': `
 Analiza la llamada "Propuesta de pago".
 - Verifica recordatorio/fecha límite/beneficios; no fuerces negociación si el cliente solo confirma.
-- Devuelve: resumen, hallazgos[], fraude.alertas[].
-`.trim(),
+- Devuelve: resumen, hallazgos[], fraude.alertas[].`.trim(),
   'Abono': `
 Analiza la llamada "Abono".
 - Extrae SOLO lo dicho: monto, fecha(s) y canal oficial. Si no se cierra, marca "negociacion_no_cerrada".
-- Devuelve: resumen, hallazgos[], fraude.alertas[].
-`.trim(),
-  // <<< NUEVO >>>
-  'Acuerdo a cuotas': `
-Analiza la llamada "Acuerdo a cuotas".
-- Verifica que exista aceptación formal del plan en cuotas y confirmación completa: número de cuotas, valor por cuota, fecha de inicio y medio de pago.
-- Devuelve: resumen, hallazgos[], fraude.alertas[].
-`.trim()
+- Devuelve: resumen, hallazgos[], fraude.alertas[].`.trim(),
+  'Pago a cuotas': `
+Analiza la llamada "Pago a cuotas".
+- Verifica aceptación formal del plan en cuotas y confirmación completa: número de cuotas, valor por cuota, fecha de inicio y medio de pago.
+- Devuelve: resumen, hallazgos[], fraude.alertas[].`.trim(),
+  'Posible negociación': `
+Analiza la llamada "Posible negociación".
+- Busca señales de intención de negociar sin compromiso formal; identifica siguiente paso, motivo de no pago, alternativas sin cerrar.
+- Si no hay objeciones, ese ítem no aplica. Devuelve: resumen, hallazgos[], fraude.alertas[].`.trim(),
+  'Renuentes': `
+Analiza la llamada "Renuentes".
+- Verifica resistencia del cliente y manejo del asesor (control emocional, reformulación empática, alternativas, trazabilidad).
+- Si no hubo objeciones, ese ítem no aplica. Devuelve: resumen, hallazgos[], fraude.alertas[].`.trim()
 };
 
 // Campaña + Tipificación dependientes
@@ -233,8 +237,7 @@ Analiza la llamada "Acuerdo a cuotas".
   if ($tipiField) $tipiField.style.display = 'none';
 
   const TIPIS_BY_CAMPAIGN = {
-    // <<< AGREGO "Acuerdo a cuotas" >>>
-    'Carteras Propias': ['Novación', 'Propuesta de pago', 'Abono', 'Acuerdo a cuotas']
+    'Carteras Propias': ['Novación', 'Propuesta de pago', 'Abono', 'Pago a cuotas', 'Posible negociación', 'Renuentes']
   };
 
   const fillTipisForCampaign = () => {
@@ -252,7 +255,6 @@ Analiza la llamada "Acuerdo a cuotas".
   };
 
   $campania?.addEventListener('change', fillTipisForCampaign);
-  // Inicial (por si el navegador recuerda el valor por recarga)
   fillTipisForCampaign();
 })();
 
@@ -375,6 +377,92 @@ async function loadBatchResult(jobId) {
   }
 }
 
+/* ===== Agregador grupal ===== */
+function buildPlanFromAfectados(afectadosTop = []) {
+  if (!afectadosTop.length) return '';
+  const SUG = [
+    { k: 'Indaga motivo', s: 'Estandarizar pregunta abierta sobre motivo de no pago y repregunta de profundidad.' },
+    { k: 'Despedida', s: 'Cerrar con nombre + empresa + agradecimiento + buen deseo (según guion).' },
+    { k: 'Ley 1581', s: 'Insertar aviso de grabación/tratamiento de datos en el primer tercio de la llamada.' },
+    { k: 'Usa guion', s: 'Reforzar speech del guion y mención de pagos SOLO a cuentas/canales corporativos.' },
+    { k: 'Evita argumentos engañosos', s: 'Prohibir promesas no verificables o presiones; usar lenguaje prudente.' },
+    { k: 'Debate objeciones', s: 'Aplicar técnica de reencuadre y beneficio-consecuencia según política vigente.' },
+    { k: 'Ofrece alternativas', s: 'Presentar 2–3 opciones reales alineadas a la situación del cliente.' }
+  ];
+  const lines = [];
+  for (const a of afectadosTop.slice(0, 4)) {
+    const f = SUG.find(x => a.text.toLowerCase().includes(x.k.toLowerCase()));
+    if (f) lines.push(`• ${f.s}`);
+  }
+  if (!lines.length) lines.push('• Mantener foco en beneficios/consecuencias, legalidad 1581 y cierre con guion.');
+  return lines.join('\n');
+}
+
+function aggregateGroupV2(items, opts = {}) {
+  const out = { total: items.length, promedio: 0, resumen: '', hallTop: [], afectadosTop: [], fraudeTop: [] };
+
+  if (!items.length) return out;
+
+  // promedio
+  let sum = 0, nNotas = 0;
+  // hallazgos
+  const hallCounts = new Map();
+  // afectados
+  const afCounts = new Map();
+  // fraude
+  const fraudes = [];
+
+  items.forEach(it => {
+    const a = it?.analisis || it?.meta?.analisis || {};
+    const nota = Number(
+      (a?.consolidado?.notaFinal) ??
+      (it?.consolidado?.notaFinal) ??
+      (it?.meta?.consolidado?.notaFinal) ??
+      it?.nota
+    );
+    if (Number.isFinite(nota)) { sum += nota; nNotas++; }
+
+    (a?.hallazgos || []).forEach(h => hallCounts.set(h, (hallCounts.get(h) || 0) + 1));
+
+    // afectados por porAtributo (aplica true && cumplido false)
+    const porAttr = a?.consolidado?.porAtributo || it?.meta?.consolidado?.porAtributo || [];
+    if (Array.isArray(porAttr) && porAttr.length) {
+      porAttr.forEach(x => {
+        if (x && x.aplica === true && x.cumplido === false && x.atributo) {
+          afCounts.set(x.atributo, (afCounts.get(x.atributo) || 0) + 1);
+        }
+      });
+    } else {
+      // fallback por lista simple de strings
+      (a?.afectadosCriticos || it?.meta?.afectadosCriticos || []).forEach(t => {
+        if (t) afCounts.set(t, (afCounts.get(t) || 0) + 1);
+      });
+    }
+
+    (a?.fraude?.alertas || []).forEach(x => fraudes.push(x));
+  });
+
+  out.promedio = nNotas ? Math.round(sum / nNotas) : 0;
+  out.hallTop = Array.from(hallCounts.entries()).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([text,count])=>`${text} (${count})`);
+  out.afectadosTop = Array.from(afCounts.entries()).sort((a,b)=>b[1]-a[1]).slice(0,10).map(([text,count])=>({ text, count }));
+  out.fraudeTop = fraudes.slice(0,10);
+
+  // resumen sintético
+  const h1 = out.hallTop[0]?.replace(/\s\(\d+\)$/, '') || '';
+  const h2 = out.hallTop[1]?.replace(/\s\(\d+\)$/, '') || '';
+  const a1 = out.afectadosTop[0]?.text || '';
+  const a2 = out.afectadosTop[1]?.text || '';
+  out.resumen = [
+    `Se analizaron ${out.total} llamada(s).`,
+    `Promedio de nota: ${out.promedio}.`,
+    h1 ? `Hallazgos frecuentes: ${h1}${h2 ? `, ${h2}` : ''}.` : '',
+    a1 ? `Ítems más afectados: ${a1}${a2 ? `, ${a2}` : ''}.` : ''
+  ].filter(Boolean).join(' ');
+
+  out.planMejora = buildPlanFromAfectados(out.afectadosTop);
+  return out;
+}
+
 // Fallback cuando /batch devuelve results directamente
 function renderBatchResultsNew(payload) {
   if ($resultsCard) $resultsCard.style.display = '';
@@ -411,32 +499,20 @@ function renderBatchResultsNew(payload) {
     $individualList?.appendChild(det);
   });
 
-  // Resumen grupal (ligero)
-  const g = aggregateGroup(okItems);
+  // Resumen grupal COMPLETO
+  const g = aggregateGroupV2(okItems);
   setTextById('grpTotal',   String(g.total));
   setTextById('grpAvg',     String(g.promedio));
   setTextById('grpResumen', g.resumen || '');
   setHtmlById('grpHall', g.hallTop.length ? g.hallTop.map(h => `<li>${escapeHtml(h)}</li>`).join('') : '<li>—</li>');
-  setTextById('grpCrit', '—');
-  setTextById('grpPlan', '—');
+  setHtmlById('grpCrit', g.afectadosTop.length ? g.afectadosTop.map(a => `<li>${escapeHtml(a.text)} (${a.count})</li>`).join('') : '<li>—</li>');
+  setTextById('grpPlan', g.planMejora || '—');
 
   const hasFraud = Array.isArray(g.fraudeTop) && g.fraudeTop.length > 0;
   if ($grpFraudeCard) $grpFraudeCard.style.display = hasFraud ? '' : 'none';
   if ($grpFraudeList) {
     $grpFraudeList.innerHTML = hasFraud ? g.fraudeTop.map(x => `<li>${formatFraudItem(x)}</li>`).join('') : '';
   }
-}
-
-function aggregateGroup(results) {
-  const out = { total: results.length, promedio: '-', resumen: '', hallTop: [], fraudeTop: [] };
-  const hallCounts = new Map(); const fraudes = [];
-  for (const r of results) {
-    (r?.analisis?.hallazgos || []).forEach(x => hallCounts.set(x, (hallCounts.get(x) || 0) + 1));
-    (r?.analisis?.fraude?.alertas || []).forEach(x => fraudes.push(x));
-  }
-  out.hallTop = Array.from(hallCounts.entries()).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([text,count])=>`${text} (${count})`);
-  out.fraudeTop = fraudes.slice(0,10);
-  return out;
 }
 
 // --------- Render por lotes (SSE tradicional) ---------
@@ -461,11 +537,9 @@ function renderBatchResults(result) {
     const afectadosCriticos = pick(consolidado, 'afectadosCriticos') || pick(analisis, 'afectadosCriticos') || pick(meta, 'afectadosCriticos') || [];
     const noAplican = pick(consolidado, 'noAplican') || pick(analisis, 'noAplican') || pick(meta, 'noAplican') || [];
 
-    // NUEVO: campaña y tipificación desde metadata (si viene)
     const campania = pick(meta, 'metadata.campania') || pick(meta, 'campania') || '';
     const tipificacion = pick(meta, 'metadata.tipificacion') || pick(meta, 'tipificacion') || '';
 
-    // NUEVO: fraude individual en SSE
     const fraude = (pick(analisis, 'fraude.alertas') || []).map(formatFraudItem);
 
     const porAtrib = flattenPorAtrib(meta);
@@ -492,8 +566,9 @@ function renderBatchResults(result) {
         ${fraude.length ? `<p><b>Alertas de fraude:</b></p><ul>${fraude.map(x => `<li>${x}</li>`).join('')}</ul>` : ''}
         <p><b>Afectados críticos:</b></p>
         <ul>${(arr(afectadosCriticos).length ? arr(afectadosCriticos).map(a => `<li>${escapeHtml(a)}</li>`).join('') : '<li>—</li>')}</ul>
-        <p><b>No aplica:</b></p>
-        <ul>${(arr(noAplican).length ? arr(noAplican).map(a => `<li>${escapeHtml(a)}</li>`).join('') : '<li>—</li>')}</ul>
+        ${arr(noAplican).length
+          ? `<p><b>No aplica:</b></p><ul>${arr(noAplican).map(a => `<li>${escapeHtml(a)}</li>`).join('')}</ul>`
+          : '' }
         ${mejoras.length ? `<p><b>Plan de mejora:</b></p><ul>${mejoras.join('')}</ul>` : ''}
         ${transcriptBlock}
       </div>
@@ -501,16 +576,31 @@ function renderBatchResults(result) {
     $individualList?.appendChild(det);
   });
 
-  const g = result.group || {};
-  setTextById('grpTotal',   String(g.total ?? g.totalCalls ?? items.length ?? 0));
+  // Resumen grupal COMPLETO (si el backend no lo trae, lo calculamos)
+  let g = result.group || {};
+  if (!g || (!g.resumen && !g.topHallazgos && !g.afectadosCriticos)) {
+    const normalized = items.map(it => ({ analisis: it.meta?.analisis, meta: it.meta }));
+    g = aggregateGroupV2(normalized);
+  } else {
+    // normaliza a nuestra UI
+    const g2 = aggregateGroupV2(items.map(it => ({ analisis: it.meta?.analisis, meta: it.meta })));
+    g.total = g.total ?? g2.total;
+    g.promedio = g.promedio ?? g2.promedio;
+    g.resumen = g.resumen ?? g2.resumen;
+    g.topHallazgos = g.topHallazgos ?? g2.hallTop;
+    g.afectadosCriticos = g.afectadosCriticos ?? g2.afectadosTop.map(a => `${a.text} (${a.count})`);
+    g.planMejora = g.planMejora ?? g2.planMejora;
+  }
+
+  setTextById('grpTotal',   String(g.total ?? items.length ?? 0));
   setTextById('grpAvg',     String(Number.isFinite(+g.promedio) ? Math.round(+g.promedio) : (g.averageScore ?? 0)));
   setTextById('grpResumen', g.resumen || '');
-  setHtmlById('grpHall', (g.topHallazgos || g.hallazgos || []).map(h => `<li>${escapeHtml(h)}</li>`).join('') || '<li>—</li>');
-  const critGroup = g.atributosCriticos || g.afectadosCriticos || [];
-  setTextById('grpCrit',   Array.isArray(critGroup) ? critGroup.join(', ') : '—');
+  setHtmlById('grpHall', (g.topHallazgos || g.hallazgos || g.hallTop || []).map(h => `<li>${escapeHtml(h)}</li>`).join('') || '<li>—</li>');
+  const critGroup = g.afectadosCriticos || g.atributosCriticos || [];
+  setHtmlById('grpCrit', Array.isArray(critGroup) && critGroup.length ? critGroup.map(x => `<li>${escapeHtml(x)}</li>`).join('') : '<li>—</li>');
   setTextById('grpPlan',   g.planMejora || '');
 
-  // NUEVO: fraude (grupo) calculado desde items si no viene en g
+  // fraude (grupo) desde items si no viene
   const fraudesGrupo = [];
   items.forEach(it => {
     const arr = pick(it, 'meta.analisis.fraude.alertas') || [];
@@ -651,4 +741,4 @@ async function reloadConsolidado() { await Promise.all([loadSummary(), loadAudit
 $('btnReload')?.addEventListener('click', reloadConsolidado);
 
 // ---------- Estado inicial ----------
-showTranscribe();
+showAnalyze(); // Analizar es la vista por defecto

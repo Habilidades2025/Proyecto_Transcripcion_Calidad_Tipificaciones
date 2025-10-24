@@ -10,7 +10,7 @@
   <header>
     <h1>IA Analista de Calidad</h1>
     <nav>
-      <button id="tabTranscribe" class="primary">Transcribir</button>
+      <button id="tabTranscribe" class="muted">Transcribir</button>
       <button id="tabAnalyze" class="primary">Analizar</button>
       <button id="tabConsolidado" class="muted">Consolidado</button>
     </nav>
@@ -103,7 +103,7 @@
         <div id="individualList" style="margin-top:8px;display:flex;flex-direction:column;gap:8px"></div>
       </details>
 
-      <fieldset>
+      <fieldset class="group-summary">
         <legend>Resumen grupal</legend>
         <p><b>Total:</b> <span id="grpTotal">-</span> &nbsp; <b>Promedio:</b> <span id="grpAvg">-</span></p>
         <p id="grpResumen" style="white-space:pre-wrap"></p>
@@ -111,10 +111,10 @@
         <h4>Hallazgos más comunes</h4>
         <ul id="grpHall"></ul>
 
-        <h4>Atributos afectados</h4>
-        <p><b>Críticos:</b> <span id="grpCrit">—</span></p>
+        <h4>Ítems afectados</h4>
+        <ul id="grpCrit" class="affected-list"></ul>
 
-        <div id="grpFraudeCard" class="fraud-box">
+        <div id="grpFraudeCard" class="fraud-box" style="display:none">
           <div class="fraud-title">Alertas de fraude (grupo)</div>
           <ul id="grpFraudeList" class="fraud-list"></ul>
         </div>
@@ -122,6 +122,7 @@
         <h4>Plan de mejora</h4>
         <pre id="grpPlan" style="white-space:pre-wrap"></pre>
       </fieldset>
+
     </div>
   </section>
 
