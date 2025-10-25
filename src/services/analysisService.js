@@ -1,4 +1,4 @@
-// src/services/analysisService.js 
+// src/services/analysisService.js
 import OpenAI from 'openai';
 
 /** ---------- Utils: parse JSON robusto ---------- */
@@ -158,21 +158,20 @@ const POSIBLENEG_ITEMS = [
 ];
 
 const RENUENTES_ITEMS = [
+  // 10 ítems (ya sin “confirmación completa”)
   '1. Informa beneficios y consecuencias de no pago',
-  '2. Realiza proceso completo de confirmación de la negociación',
-  '3. Indaga motivo del no pago',
-  '4. Solicita autorización para contacto por otros medios',
-  '5. Despedida según guion establecido',
-  '6. Ofrece alternativas acordes a la realidad del cliente y políticas vigentes',
-  '7. Debate objeciones según situación del cliente',
-  '8. Informa que la llamada es grabada y monitoreada (Ley 1581)',
-  '9. Usa guion completo establecido por la campaña',
-  '10. Evita argumentos engañosos con el cliente',
-  '11. Utiliza vocabulario prudente y respetuoso'
+  '2. Indaga motivo del no pago',
+  '3. Solicita autorización para contacto por otros medios',
+  '4. Despedida según guion establecido',
+  '5. Ofrece alternativas acordes a la realidad del cliente y políticas vigentes',
+  '6. Debate objeciones según situación del cliente',
+  '7. Informa que la llamada es grabada y monitoreada (Ley 1581)',
+  '8. Usa guion completo establecido por la campaña',
+  '9. Evita argumentos engañosos con el cliente',
+  '10. Utiliza vocabulario prudente y respetuoso'
 ];
 
 /* =============== Prompts específicos por caso =============== */
-// Reemplaza tu strictEvidenceBlock() por este:
 function strictEvidenceBlock() {
   return `
 REGLA DE EVIDENCIA (muy estricta):
@@ -183,11 +182,10 @@ REGLA DE EVIDENCIA (muy estricta):
 
 REGLAS DE VALIDACIÓN ESPECÍFICAS:
 • “Indaga motivo del no pago”: la cita debe ser **la pregunta del agente** (p.ej., “¿Cuál es el motivo…?”, “¿Por qué no ha podido…?”, “¿Qué le impidió…?”). Si la justificación es solo una **respuesta del cliente** o una **preocupación** del cliente → **no_evidencia**.
-• “Ley 1581”: la cita debe contener **“1581”** o una mención explícita a **protección/tratamiento de datos** + “ley”. “Llamada grabada” sin “1581” **no es suficiente**.
+• “Ley 1581”: la cita debe contener **“1581”** (acepta dígitos con espacios: “15 81”) o una mención explícita a **protección/tratamiento de datos** + “ley”. “Llamada grabada” sin “1581” **no es suficiente**.
 • “Autorización para otros medios”: la evidencia debe mostrar **pregunta de autorización** y **aceptación del cliente**. Pedir “envíe el soporte por WhatsApp” **no es autorización**.
 `.trim();
 }
-
 
 /* --- Novación (Carteras Propias) --- */
 function buildNovacionExtraPrompt() {
@@ -242,14 +240,14 @@ ${strictEvidenceBlock()}
 ${PP_ITEMS.map(s => `- ${s}`).join('\n')}
 
 REGLA ESPECÍFICA — DESPEDIDA SEGÚN GUION (ítem 5):
-• Para **cumplir**, en la **parte final** de la llamada (último 25% del tiempo) debe existir una despedida que contenga al menos **dos** de estos tres elementos:
-  1) **Identificación del agente + empresa** en una forma cercana al guion (ej.: "Habló con/Le habló... Soy [Nombre] de Contacto Solutions/Novartec").
-  2) **Agradecimiento** (gracias/agradezco su tiempo).
-  3) **Buen deseo** (feliz día/que esté muy bien).
-• La **justificación** debe citar literalmente la frase de cierre (con hora aproximada). Si no hay evidencia suficiente → **cumplido=false** para el ítem 5.
+• Para **cumplir**, en la **parte final** de la llamada (último 25%) debe existir una despedida que contenga al menos **dos** de estos tres elementos:
+  1) **Identificación del agente + empresa** (variantes válidas: “Habló con…/Le habló…/Soy… [Nombre] de Contacto Solutions/Novartec/Novatech”).
+  2) **Agradecimiento**.
+  3) **Buen deseo**.
+• Citar literalmente la frase de cierre (con hora). Si no hay evidencia suficiente → **cumplido=false**.
 
 ACLARACIONES:
-- En (2) “confirmación completa de la negociación”, exige confirmación **explícita** de monto **y** fecha **y** medio oficial. Si falta cualquiera → **no cumple**.
+- En “confirmación completa de la negociación”, exige monto **y** fecha **y** medio oficial.
 
 CÁLCULO DE NOTA (binaria):
 • Solo ítems con "aplica": true.
@@ -267,19 +265,13 @@ FRAUDE:
 function buildAbonoExtraPrompt() {
   return `
 EVALUACIÓN ESPECÍFICA — ABONO (Carteras Propias)
-Definición (operativa): **ABONO** es cuando el cliente se **compromete a realizar un pago parcial** (no liquida la totalidad) **sobre un ACUERDO VIGENTE**, con el fin explícito de **no perder dicho acuerdo ni sus beneficios**.
+Definición (operativa): **ABONO** = compromiso de **pago parcial** sobre un **acuerdo vigente** para **no perder** el acuerdo.
 
-DECISIÓN PREVIA (clasificación antes de puntuar):
-• Marca **"abono.aceptado": true** SOLO si se cumplen ambos:
-  A) **Existe ACUERDO VIGENTE** (verificable).
-  B) **Compromiso de PAGO PARCIAL** (“abono/pago parcial”). Ideal si hay **monto**/**fecha** y, si aparece, **canal oficial**.
-
-• Si **NO** se cumplen A y B:
-  - "abono.aceptado": false
-  - "abono.motivo_no_aplica": "No aplica — sin evidencia de acuerdo vigente y/o sin compromiso de pago parcial (abono)."
-  - En "consolidado.porAtributo": marca todos "aplica": false
-  - "consolidado.notaFinal": 0
-  - FIN.
+DECISIÓN PREVIA:
+• Marca "abono.aceptado": true SOLO si:
+  A) hay **acuerdo vigente**, y
+  B) hay **compromiso de pago parcial** (ideal con monto/fecha y canal oficial).
+• Si NO: "abono.aceptado": false; todos "aplica": false; "notaFinal": 0; FIN.
 
 ${strictEvidenceBlock()}
 
@@ -288,139 +280,105 @@ ${ABONO_ITEMS.map(s => `- ${s}`).join('\n')}
 
 CÁLCULO DE NOTA (binaria):
 • Considera solo ítems con "aplica": true.
-• Si **alguno** aplicable tiene "cumplido": false → **notaFinal = 0**.
-• Si **todos** los aplicables tienen "cumplido": true → **notaFinal = 100**.
-• Si ningún ítem aplica, notaFinal = 100.
+• Algún aplicable en false → **0**.
+• Todos true → **100**.
+• Ninguno aplica → **100**.
 
 FRAUDE:
-• Señala "cuenta_no_oficial" cuando se pida consignar/transferir a canal NO oficial.
-• Señala "contacto_numero_no_oficial" por uso de números/WhatsApp personales.
+• "cuenta_no_oficial" cuando pidan consignar a canal NO oficial.
+• "contacto_numero_no_oficial" por números/WhatsApp personales.
 `.trim();
 }
 
-/* --- Pago a cuotas (antes “Acuerdo a cuotas”) --- */
+/* --- Pago a cuotas --- */
 function buildPagoCuotasExtraPrompt() {
   return `
 EVALUACIÓN ESPECÍFICA — PAGO A CUOTAS (Carteras Propias)
-Definición: el cliente acepta un **plan en cuotas** con **número de cuotas**, **valor por cuota**, **fecha de inicio** y (si aparece) **canal oficial** de pago.
+Definición: plan en cuotas con **número de cuotas**, **valor por cuota**, **fecha de inicio** y (si aparece) **canal oficial**.
 
 DECISIÓN PREVIA:
-• Si **NO** hay aceptación formal del plan en cuotas:
-  - "pago_cuotas.aceptado": false
-  - "pago_cuotas.motivo_no_aplica": "No aplica — sin aceptación formal del pago a cuotas."
-  - Marca todos los ítems con "aplica": false
-  - "consolidado.notaFinal": 0
-  - FIN.
+• Si **NO** hay aceptación formal: "pago_cuotas.aceptado": false; todas "aplica": false; nota 0; FIN.
 
 ${strictEvidenceBlock()}
 
-REGLAS POR ÍTEM (deben cumplirse con citas):
-1) Beneficios y consecuencias: citar ≥1 beneficio **y** ≥1 consecuencia. Falta cualquiera → **no cumple**.
-2) Confirmación completa de la negociación: exige **número de cuotas + valor por cuota + primera fecha + canal oficial**; sin los cuatro → **no cumple**.
-3) Indaga motivo de no pago: pregunta **abierta** o exploración clara de causa.
-4) Autorización para otros medios: evidencia explícita de autorización.
-5) Despedida según guion: ver definiciones arriba.
-6) Alternativas acordes a política: opciones reales y coherentes con la situación del cliente.
-7) Manejo de objeciones: solo **aplica=true** si hubo objeciones; si **no hubo**, marca **aplica=false** (no penaliza).
-8) Ley 1581: debe verse **“1581”** en la cita del agente.
-9) Guion completo: debe quedar explícito que **solo se recauda a cuentas empresariales** y/o se mencionan **canales oficiales** (PSE, link de pago, portal, oficinas autorizadas). Sin eso → **no cumple**.
-10) Evita argumentos engañosos: no prometer condonaciones/beneficios inexistentes.
+REGLAS POR ÍTEM (citas literales):
+1) Beneficios y consecuencias: ≥1 beneficio **y** ≥1 consecuencia.
+2) Confirmación completa: número de cuotas + valor por cuota + primera fecha + canal oficial.
+3) Indaga motivo: pregunta abierta real.
+4) Autorización: evidencia explícita de autorización.
+5) Despedida: ver regla.
+6) Alternativas acordes a política.
+7) Objeciones: si **no hubo**, **aplica=false** (no penaliza).
+8) Ley 1581: debe verse “1581” (acepta “15 81”).
+9) Guion: solo recaudo **corporativo** y **canales oficiales**.
+10) Evita argumentos engañosos.
 11) Vocabulario prudente y respetuoso.
 
-ÍTEMS CRÍTICOS (peso 100% si aplica):
+ÍTEMS CRÍTICOS:
 ${PAGO_CUOTAS_ITEMS.map(s => `- ${s}`).join('\n')}
 
 CÁLCULO DE NOTA:
-• Solo ítems con "aplica": true.
-• Si algún aplicable queda "cumplido=false" → **notaFinal = 0**.
-• Si todos los aplicables quedan "cumplido=true" → **notaFinal = 100**.
-• Si nada aplica → **100** (no penaliza).
+• Algún aplicable false → 0; todos true → 100; nada aplica → 100.
 `.trim();
 }
 
-// Reemplaza tu buildPosibleNegociacionExtraPrompt() por este:
+/* --- Posible negociación — (calibrada) --- */
 function buildPosibleNegociacionExtraPrompt() {
   return `
 EVALUACIÓN — POSIBLE NEGOCIACIÓN (Carteras Propias)
-Definición: el cliente muestra **disposición** a negociar/recibir información pero **sin** compromiso formal (no hay monto/fecha/medio cerrados).
+Definición: el cliente muestra **disposición** a negociar/recibir información **sin** compromiso formal (no hay monto/fecha/medio cerrados).
 
 DECISIÓN PREVIA:
 • Si **NO** hay señales claras de posible negociación:
   - "posible_negociacion.aplica": false
   - "posible_negociacion.motivo_no_aplica": "No aplica — sin posible negociación."
-  - Marca todos los ítems con "aplica": false
-  - "consolidado.notaFinal": 0
-  - FIN.
+  - Todas "aplica": false; "notaFinal": 0; FIN.
 
 ${strictEvidenceBlock()}
 
 VOCABULARIO VÁLIDO (beneficios/consecuencias):
-• Beneficios (ejemplos aceptables): **descuento**, **condonación de intereses/mora**, **normalización del crédito**, **evitar reporte negativo**, **reactivación del servicio**, **acceso a acuerdos/planes**.
-• Consecuencias (ejemplos aceptables): **reporte en centrales**, **proceso jurídico/embargos**, **incremento de intereses/cargos por mora**, **bloqueo/cancelación del producto**.
-• **No válido** para #1: miedos o noticias (**“estafa”, “publicación”**) y cualquier frase que no sea un beneficio/consecuencia **de no pago**.
+• Beneficios (ejemplos): **descuento**, **condonación de intereses/mora**, **normalización**, **evitar reporte negativo**, **reactivación**, **acceso a acuerdo/plan**.
+• Consecuencias (ejemplos): **reporte en centrales**, **proceso jurídico/embargos**, **incremento de intereses/cargos por mora**, **bloqueo/cancelación**.
+• **No válido** para #1: “estafa”, “publicación”, “miedo”, u otras frases que **no** sean beneficio/consecuencia **de no pago**.
 
 REGLAS POR ÍTEM:
-1) **Beneficios y consecuencias**: exige ≥1 beneficio **y** ≥1 consecuencia del listado anterior, con **citas literales**. Si solo hay temores/estafa → **no cumple**.
-2) **Indaga motivo del no pago**: debe existir **pregunta abierta del agente** (cita literal). Respuestas o preocupaciones del cliente **no reemplazan** la pregunta → si no está, **no cumple**.
-3) **Autorización otros medios**: evidencia de **pregunta de autorización** + **aceptación**. “Envíe el soporte por WhatsApp” **NO** es autorización.
-4) **Despedida (guion)**: en el **tramo final** (último 25% de la llamada) debe contener al menos **2 de 3**:
-   a) **Identificación agente + empresa** con variantes flexibles: “Le habló… / Habló con… / Soy… / **Recuerde que habló con** [Nombre] de **Contacto Solution(s)/Novartec**”.
-   b) **Agradecimiento** (“gracias”, “agradezco su tiempo”).
-   c) **Buen deseo** (“feliz día/tarde/noche”, “que esté muy bien”).
-   Solo “buen deseo” **no basta**.
-7) **Ley 1581**: debe mencionarse el **número 1581** o frase equivalente de protección/tratamiento de datos **con** mención de ley. Citas que hablen de bancos/tuya/consulta de crédito **no cuentan**.
-8) **Uso del guion (canales oficiales)**: valida **exclusivamente** que el agente aclare que **se recauda únicamente por cuentas/canales corporativos/empresariales** (variantes válidas):
-   - “se recauda únicamente a cuentas **empresariales/corporativas**”,
-   - “**Novartec/Contacto Solutions** recauda solo a nombre de la compañía”,
-   - “**En Novarte de Contacto Solutions solamente generan recaudo para obligaciones pendientes a nombre de la compañía**” (aceptar esta variación).
-6/7) **Objeciones**: 
-   - Si **no** hubo objeciones del cliente, marca el ítem “Debate objeciones…” como **aplica=false** **y** **cumplido=true** (no penaliza).
-   - Si hubo objeción, el agente debe responder **acorde a la necesidad** y a política (cita literal).
+1) Beneficios+consecuencias: requiere ≥1 de cada tipo con **citas**. “Estafa/publicación” **no cuentan**.
+2) Indaga motivo: **pregunta abierta del agente**; respuestas del cliente **no sustituyen** la pregunta.
+3) Autorización otros medios: **pregunta de autorización** + **aceptación**.
+4) Despedida (guion): se acepta como **cumple** si hay **identificación del agente + empresa** (p.ej., “Recuerde que le habló … de Novartec/Contacto Solutions”), aunque no haya agradecimiento/deseo.
+6) Objeciones: si **no hubo**, marca **aplica=false** y **cumplido=true**.
+7) Ley 1581: aceptar también **“15 81”** con espacios.
+8) Guion (canales oficiales): aclarar que **solo** se recauda a **cuentas/canales corporativos** (variantes válidas).
 
-ÍTEMS CRÍTICOS (peso 100% si aplica):
-${POSIBLENEG_ITEMS.map(s => `- ${s}`).join('\n')}
-
-CÁLCULO DE NOTA (binaria):
-• Solo ítems con "aplica": true.
-• Falla cualquiera aplicable → **0**. Todos cumplen → **100**. Si nada aplica → **100**.
+CÁLCULO DE NOTA:
+• Solo ítems con "aplica": true. Algún false → 0; todos true → 100; nada aplica → 100.
 
 FRAUDE:
-• Canales NO oficiales de pago → "cuenta_no_oficial".
-• Números o WhatsApp **personales** → "contacto_numero_no_oficial" (incluye 10 dígitos asociados a “WhatsApp”).
+• "cuenta_no_oficial" ante consignación a canal NO oficial.
+• "contacto_numero_no_oficial" por número/WhatsApp personal.
 `.trim();
 }
 
-/* --- Renuentes (Carteras Propias) --- */
+/* --- Renuentes (actualizado a 10 ítems, sin “confirmación completa”) --- */
 function buildRenuenteExtraPrompt() {
   return `
 EVALUACIÓN — CLIENTE RENUENTE (Carteras Propias)
-Definición: el titular **evita** comprometerse (resistencia activa/pasiva). Objetivo: reducir resistencia y abrir camino a la negociación.
+Definición: el titular evita comprometerse (resistencia activa/pasiva).
 
 DECISIÓN PREVIA:
-• Si el cliente **no** muestra renuencia (colabora normalmente):
-  - "renuente.aplica": false
-  - "renuente.motivo_no_aplica": "No aplica — sin señales de renuencia."
-  - Marca todos los ítems "aplica": false
-  - "consolidado.notaFinal": 0
-  - FIN.
+• Si no hay renuencia: "renuente.aplica": false; todas "aplica": false; nota 0; FIN.
 
 ${strictEvidenceBlock()}
 
 APLICABILIDAD Y REGLAS:
-• Ítem 2 (proceso completo de confirmación): normalmente **no aplica** (no hay cierre). Sólo **aplica=true** si realmente se cierra negociación.
-• Ítem 6 (alternativas) y 7 (objeciones): 
-  - **aplica=true** si el agente propone opciones reales / gestiona objeciones; 
-  - si **no** se presentan, **aplica=false**.
-• El resto (1,3,4,5,8,9,10,11) se evalúa idéntico a Pago a cuotas (mismas evidencias y citas).
+• Ítem 5 (alternativas) y 6 (objeciones): si no se presentan, **aplica=false**.
+• Resto igual que en Pago a cuotas.
 
 ÍTEMS CRÍTICOS:
 ${RENUENTES_ITEMS.map(s => `- ${s}`).join('\n')}
 
-CÁLCULO DE NOTA (binaria):
-• Solo ítems con "aplica": true.
-• Falla cualquiera aplicable → **0**. Todos cumplen → **100**. Si nada aplica → **100**.
-
-FRAUDE (mismo umbral estricto del bloque de evidencia).
+CÁLCULO:
+• Algún aplicable false → 0; todos true → 100; nada aplica → 100.
 `.trim();
 }
 
@@ -514,6 +472,268 @@ function ensureConsolidadoForType(analisis = {}, type) {
   return analisis;
 }
 
+/* ===== Helpers de calibración SOLO para "Posible negociación" ===== */
+function norm(s='') {
+  return s.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+}
+function findLey1581(text='') {
+  const t = norm(text);
+  const m = /ley\s*1\s*5\s*8\s*1\b|\b1\s*5\s*8\s*1\b|\b1581\b/.exec(t);
+  return m ? m[0] : null;
+}
+function containsCompany(s='') {
+  const t = norm(s);
+  return (
+    t.includes('novartec') ||
+    t.includes('novatec') ||
+    t.includes('novatech') ||
+    t.includes('novartek') ||
+    t.includes('contacto solution') ||
+    t.includes('contacto solutions') ||
+    t.includes('contact solution') ||
+    t.includes('contact solutions') ||
+    t.includes('contacto a solution') ||
+    t.includes('contacto a solutions')
+  );
+}
+function containsAgentIdPhrase(s='') {
+  const t = norm(s);
+  return (
+    t.includes('recuerde que le hablo') ||
+    t.includes('recuerde que le hablo') ||
+    t.includes('le hablo ') || t.includes('le hablo,') ||
+    t.includes('le hablo.') || t.includes('le hablo;') ||
+    t.includes('le hablo') || t.includes('le hablo') ||
+    t.includes('le hablo') ||
+    t.includes('le hablo') ||
+    t.includes('le habló') || t.includes('le hablo') || t.includes('le hablo') ||
+    t.includes('hablo con') || t.includes('habló con') ||
+    t.includes('soy ') || t.includes('mi nombre')
+  );
+}
+function findFarewellEvidence(just='', transcript='') {
+  // 1) ¿Ya viene en la justificación?
+  if (just && containsAgentIdPhrase(just) && containsCompany(just)) return just;
+  // 2) Buscar en la transcripción líneas con “Agente: …”
+  const lines = String(transcript||'').split(/\r?\n/);
+  for (const ln of lines.reverse()) {
+    const l = ln.trim();
+    if (!l) continue;
+    const lower = norm(l);
+    if ((lower.includes('agente:') || lower.includes('asesor:') || lower.includes('asesora:') || true) &&
+        containsAgentIdPhrase(l) && containsCompany(l)) {
+      return l.slice(0, 220);
+    }
+  }
+  // 3) Búsqueda laxa
+  const t = String(transcript||'');
+  if (containsAgentIdPhrase(t) && containsCompany(t)) {
+    const idx = norm(t).indexOf('habl');
+    const start = Math.max(0, idx - 60);
+    return t.slice(start, start + 220);
+  }
+  return null;
+}
+const BENEFICIO_LEX = [
+  'descuento','condonacion','condonación','normalizacion','normalización',
+  'evitar reporte','quitar reporte','levantar reporte','mejorar calificacion','reactivacion','reactivación',
+  'plan de pagos','acuerdo de pago','acceso a acuerdo','financiacion','financiación','reliquidacion','novacion','novación'
+];
+const CONSECUENCIA_LEX = [
+  'reporte','centrales','juridico','jurídico','embargo','proceso','prejuridico','prejurídico',
+  'intereses','mora','incremento','castigo','bloqueo','cancelacion','cancelación','suspension','suspensión',
+  'traslado a juridica','juridica','jurídica'
+];
+const INVALID_BENCONS = ['estafa','publicacion','publicación','miedo','preocupacion','preocupación'];
+
+function hasAnyLex(s='', lex=[]) {
+  const t = norm(s);
+  return lex.some(k => t.includes(norm(k)));
+}
+function hasBenefitAndConsequence(text='') {
+  const t = norm(text);
+  if (INVALID_BENCONS.some(k => t.includes(k))) return false;
+  const hasB = hasAnyLex(t, BENEFICIO_LEX);
+  const hasC = hasAnyLex(t, CONSECUENCIA_LEX);
+  return hasB && hasC;
+}
+
+// --- NUEVO: evidencia de guion corporativo/empresarial (no valen listados de bancos) ---
+function hasCorporateChannelEvidence(text='') {
+  const t = norm(text);
+  if (
+    t.includes('cuentas empres') || t.includes('cuenta empres') ||
+    t.includes('cuentas corporativ') || t.includes('canales corporativ') || t.includes('canal corporativ') ||
+    t.includes('a nombre de la compan') || t.includes('a nombre de la compañ') || t.includes('a nombre de la empresa') ||
+    (t.includes('recaud') && (t.includes('empres') || t.includes('corporativ') || t.includes('compania') || t.includes('compañia') || t.includes('empresa')))
+  ) {
+    return true;
+  }
+  return false;
+}
+function findCorporateEvidenceLine(transcript='') {
+  const lines = String(transcript||'').split(/\r?\n/);
+  for (const ln of lines) {
+    if (hasCorporateChannelEvidence(ln)) return ln;
+  }
+  return null;
+}
+
+function calibratePosibleNegociacion(analisis={}, transcript='') {
+  if (!analisis?.consolidado?.porAtributo) return analisis;
+  const por = ensureBlock(analisis.consolidado.porAtributo);
+
+  for (const a of por) {
+    const label = norm(a?.atributo || '');
+
+    // Ítem 4 — Despedida según guion establecido (aceptar identificación + empresa)
+    if (label.startsWith('4.') && label.includes('despedida')) {
+      if (a.aplica !== false && a.cumplido === false) {
+        const ev = findFarewellEvidence(a.justificacion, transcript);
+        if (ev) {
+          a.cumplido = true;
+          if (!a.justificacion || a.justificacion === 'no_evidencia') {
+            a.justificacion = `"${String(ev).trim()}"`;
+          }
+        }
+      }
+    }
+
+    // Ítem 7 — Ley 1581 (aceptar "15 81" y forzar NO CUMPLE si no hay ley)
+    if (label.startsWith('7.') || label.includes('1581') || label.includes('grabada')) {
+      if (a.aplica !== false) {
+        const hasLaw = !!(findLey1581(a.justificacion) || findLey1581(transcript));
+        if (hasLaw) {
+          a.cumplido = true;
+          if (!a.justificacion || a.justificacion === 'no_evidencia') {
+            const line = (String(transcript||'').split(/\r?\n/).find(l => findLey1581(l)) || 'Se menciona la ley 1581 (o “15 81”) y tratamiento/protección de datos.');
+            a.justificacion = `"${line.trim().slice(0,220)}"`;
+          }
+        } else {
+          a.cumplido = false;
+          a.justificacion = 'no_evidencia';
+        }
+      }
+    }
+
+    // Ítem 1 — Beneficios y consecuencias (endurecido)
+    if (label.startsWith('1.') && label.includes('beneficios') && label.includes('consecuencias')) {
+      const source = a.justificacion && a.justificacion !== 'no_evidencia'
+        ? a.justificacion
+        : transcript;
+      const ok = hasBenefitAndConsequence(source);
+      if (!ok) {
+        a.cumplido = false;
+        if (!a.justificacion || a.justificacion === 'no_evidencia') {
+          a.justificacion = 'no_evidencia';
+        } else if (INVALID_BENCONS.some(k => norm(a.justificacion).includes(k))) {
+          a.justificacion = 'no_evidencia';
+        }
+      }
+    }
+
+    // Ítem 8 — Guion completo (debe aclarar CUENTAS/CANALES CORPORATIVOS/EMPRESARIALES)
+    // Listar bancos/medios NO es suficiente.
+    if (label.startsWith('8.') || (label.includes('guion') && label.includes('campana'))) {
+      if (a.aplica !== false) {
+        const source = (a.justificacion && a.justificacion !== 'no_evidencia') ? a.justificacion : transcript;
+        const okCorp = hasCorporateChannelEvidence(source) || hasCorporateChannelEvidence(transcript);
+        if (okCorp) {
+          a.cumplido = true;
+          if (!a.justificacion || a.justificacion === 'no_evidencia') {
+            const line = findCorporateEvidenceLine(transcript) || 'Se aclara que el recaudo es únicamente por cuentas/canales corporativos a nombre de la compañía.';
+            a.justificacion = `"${line.trim().slice(0,220)}"`;
+          }
+        } else {
+          a.cumplido = false;
+          a.justificacion = 'no_evidencia';
+        }
+      }
+    }
+  }
+
+  analisis.consolidado.porAtributo = por;
+  return analisis;
+}
+
+/* ===== NUEVO: Calibración SOLO para "Renuentes" (actualizada a 10 ítems) ===== */
+function calibrateRenuente(analisis={}, transcript='') {
+  if (!analisis?.consolidado?.porAtributo) return analisis;
+  const por = ensureBlock(analisis.consolidado.porAtributo);
+
+  for (const a of por) {
+    const label = norm(a?.atributo || '');
+
+    // Ítem 4 — Despedida (aceptar identificación + empresa)
+    if (label.startsWith('4.') && label.includes('despedida')) {
+      if (a.aplica !== false && a.cumplido === false) {
+        const ev = findFarewellEvidence(a.justificacion, transcript);
+        if (ev) {
+          a.cumplido = true;
+          if (!a.justificacion || a.justificacion === 'no_evidencia') {
+            a.justificacion = `"${String(ev).trim()}"`;
+          }
+        }
+      }
+    }
+
+    // Ítem 7 — Ley 1581 (aceptar "15 81"; forzar NO CUMPLE si no hay ley)
+    // ¡OJO! No anclamos por número; buscamos '1581' o 'grabada' en el label o evidencia.
+    if (label.includes('1581') || label.includes('grabada')) {
+      if (a.aplica !== false) {
+        const hasLaw = !!(findLey1581(a.justificacion) || findLey1581(transcript));
+        if (hasLaw) {
+          a.cumplido = true;
+          if (!a.justificacion || a.justificacion === 'no_evidencia') {
+            const line = (String(transcript||'').split(/\r?\n/).find(l => findLey1581(l)) || 'Se menciona la ley 1581 (o “15 81”) y tratamiento/protección de datos.');
+            a.justificacion = `"${line.trim().slice(0,220)}"`;
+          }
+        } else {
+          a.cumplido = false;
+          a.justificacion = 'no_evidencia';
+        }
+      }
+    }
+
+    // Ítem 1 — Beneficios y consecuencias (mismo endurecimiento)
+    if (label.startsWith('1.') && label.includes('beneficios') && label.includes('consecuencias')) {
+      const source = a.justificacion && a.justificacion !== 'no_evidencia'
+        ? a.justificacion
+        : transcript;
+      const ok = hasBenefitAndConsequence(source);
+      if (!ok) {
+        a.cumplido = false;
+        if (!a.justificacion || a.justificacion === 'no_evidencia') {
+          a.justificacion = 'no_evidencia';
+        } else if (INVALID_BENCONS.some(k => norm(a.justificacion).includes(k))) {
+          a.justificacion = 'no_evidencia';
+        }
+      }
+    }
+
+    // Ítem 8 — Guion completo (CUENTAS/CANALES CORPORATIVOS/EMPRESARIALES obligatorios)
+    if (label.startsWith('8.') || (label.includes('guion') && label.includes('campana'))) {
+      if (a.aplica !== false) {
+        const source = (a.justificacion && a.justificacion !== 'no_evidencia') ? a.justificacion : transcript;
+        const okCorp = hasCorporateChannelEvidence(source) || hasCorporateChannelEvidence(transcript);
+        if (okCorp) {
+          a.cumplido = true;
+          if (!a.justificacion || a.justificacion === 'no_evidencia') {
+            const line = findCorporateEvidenceLine(transcript) || 'Se aclara que el recaudo es únicamente por cuentas/canales corporativos a nombre de la compañía.';
+            a.justificacion = `"${line.trim().slice(0,220)}"`;
+          }
+        } else {
+          a.cumplido = false;
+          a.justificacion = 'no_evidencia';
+        }
+      }
+    }
+  }
+
+  analisis.consolidado.porAtributo = por;
+  return analisis;
+}
+
 /* ==================== Analizador principal ==================== */
 export async function analyzeTranscriptSimple({
   transcript,
@@ -535,7 +755,7 @@ export async function analyzeTranscriptSimple({
   const isNovacionCP       = isCP && (tipKey === 'novacion' || tipKey === 'novación');
   const isPropuestaPagoCP  = isCP && (tipKey === 'propuesta de pago' || tipKey === 'propuesta_pago');
   const isAbonoCP          = isCP && (tipKey === 'abono');
-  const isPagoCuotasCP  = isCP && (tipKey === 'pago a cuotas' || tipKey === 'pago_a_cuotas' || tipKey === 'pago cuotas');
+  const isPagoCuotasCP     = isCP && (tipKey === 'pago a cuotas' || tipKey === 'pago_a_cuotas' || tipKey === 'pago cuotas');
   const isPosibleNegociacionCP = isCP && (tipKey === 'posible negociacion' || tipKey === 'posible_negociacion');
   const isRenuentesCP          = isCP && (tipKey === 'renuentes' || tipKey === 'renuente' || tipKey === 'cliente renuente' || tipKey === 'cliente_renuente');
 
@@ -796,6 +1016,14 @@ ${
     acuerdo_cuotas: json?.acuerdo_cuotas,
     consolidado: json?.consolidado
   };
+
+  // ===== Calibración SOLO para "Posible negociación" / "Renuentes" (antes de nota y críticos) =====
+  if (isPosibleNegociacionCP && analisis?.consolidado?.porAtributo) {
+    analisis = calibratePosibleNegociacion(analisis, String(transcript || ''));
+  }
+  if (isRenuentesCP && analisis?.consolidado?.porAtributo) {
+    analisis = calibrateRenuente(analisis, String(transcript || ''));
+  }
 
   // ---- Post-proceso por caso para nota 100/0 y afectados críticos
   if (isNovacionCP)             analisis = ensureConsolidadoForType(analisis, 'novacion');
