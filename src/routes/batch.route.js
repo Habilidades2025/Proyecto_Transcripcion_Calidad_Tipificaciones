@@ -15,23 +15,25 @@ import { saveAudit } from '../services/persistService.js';
 /* --------------------------- Helpers de log --------------------------- */
 const log = (...a) => console.log('[batch]', ...a);
 
-/* --------------------------- Config Upload --------------------------- */
-const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: {
-    fileSize: Number(process.env.UPLOAD_MAX_FILE_SIZE || 100 * 1024 * 1024),
-    files: Number(process.env.UPLOAD_MAX_FILES || 50)
-  }
-});
-
 /* ------------------------------ Utils -------------------------------- */
 const router = express.Router();
 const AUDIO_RE = /\.(wav|mp3|m4a|ogg|flac|aac|webm)$/i;
+const { promises: fsp } = fs;
 
 function s(v, d = '') { return (v == null ? d : String(v)).trim(); }
 function nowMs() { return Date.now(); }
 function dur(t0) { return Math.max(0, nowMs() - t0); }
 function jsonParseSafe(x, fallback = null) { try { return x ? JSON.parse(x) : fallback; } catch { return fallback; } }
+function ensureDirPath(d) { if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true }); }
+
+async function getFileBuffer(file) {
+  if (file?.buffer) return file.buffer;
+  if (file?.path) return await fsp.readFile(file.path);
+  throw new Error('Archivo inválido (sin buffer ni path).');
+}
+async function cleanupUploaded(file) {
+  if (file?.path) { try { await fsp.unlink(file.path); } catch {} }
+}
 
 async function mapWithConcurrency(items, concurrency, worker) {
   const results = new Array(items.length);
@@ -94,6 +96,30 @@ ensureDir(DATA_DIR);
 ensureDir(BATCH_META_DIR);
 ensureDir(REPORTS_DIR);
 ensureDir(REPORTS_BATCH_DIR);
+
+/* --------------------------- Config Upload --------------------------- */
+// Soporte memoria o disco (según .env):
+// - UPLOAD_USE_DISK=1 → usa diskStorage en tmp/uploads (o UPLOAD_DISK_DIR)
+// - UPLOAD_MAX_FILES (default 200)
+// - UPLOAD_MAX_FILE_SIZE (default 100MB)
+const USE_DISK = String(process.env.UPLOAD_USE_DISK ?? '0') !== '0';
+const UPLOAD_DIR = process.env.UPLOAD_DISK_DIR || path.resolve('tmp', 'uploads');
+if (USE_DISK) ensureDirPath(UPLOAD_DIR);
+
+const storage = USE_DISK
+  ? multer.diskStorage({
+      destination: (_req, _file, cb) => cb(null, UPLOAD_DIR),
+      filename: (_req, file, cb) => cb(null, `${Date.now()}-${file.originalname}`)
+    })
+  : multer.memoryStorage();
+
+const upload = multer({
+  storage,
+  limits: {
+    fileSize: Number(process.env.UPLOAD_MAX_FILE_SIZE || 100 * 1024 * 1024),
+    files: Number(process.env.UPLOAD_MAX_FILES || 200) // ← sube el default a 200
+  }
+});
 
 /* ---------------------------- Helpers batch --------------------------- */
 function buildBatchMarkdown(job, results) {
@@ -167,15 +193,17 @@ async function handleDirect(req, res) {
     const tipiMap       = jsonParseSafe(req.body.tipificacion_map, null);
     const tipiPromptUI  = s(req.body.tipi_prompt || '');
 
-    const CONC = Math.max(1, Number(process.env.BATCH_CONCURRENCY || 3));
+    // Concurrencia configurable: BATCH_MAX_PARALLEL (fallback BATCH_CONCURRENCY)
+    const CONC = Math.max(1, Number(process.env.BATCH_MAX_PARALLEL ?? process.env.BATCH_CONCURRENCY ?? 8));
     const startedAll = nowMs();
 
     const worker = async (file, index) => {
       const t0 = nowMs();
       const name = file?.originalname || `audio_${index+1}`;
       try {
-        // a) Transcribir
-        const tr = await transcribeAudio(file.buffer, { provider });
+        // a) Transcribir (lee buffer desde memoria o disco)
+        const audioBuf = await getFileBuffer(file);
+        const tr = await transcribeAudio(audioBuf, { provider });
 
         // Preferimos líneas marcadas si existen; si no, caemos al texto plano
         let transcriptMarked = '';
@@ -207,6 +235,7 @@ async function handleDirect(req, res) {
         // e) Persistencia individual
         const metadata = {
           timestamp: new Date().toISOString(),
+          callId: name.replace(/\.[^.]+$/, ''), // ← ahora también en modo directo
           originalFile: name,
           agentName: analisis?.agent_name || '',
           customerName: analisis?.client_name || '',
@@ -235,6 +264,8 @@ async function handleDirect(req, res) {
         };
       } catch (err) {
         return { ok:false, index, fileName:name, durationMs:dur(t0), error:String(err?.message||err) };
+      } finally {
+        await cleanupUploaded(file); // limpia archivo temporal si se usó diskStorage
       }
     };
 
@@ -362,7 +393,8 @@ async function handleStart(req, res) {
     const job = newJob(files, { provider, campania, tipificacionDefault: tipificacion });
     res.json({ jobId: job.id }); // UI espera respuesta inmediata
 
-    const CONC = Math.max(1, Number(process.env.BATCH_CONCURRENCY || 3));
+    // Concurrencia configurable: BATCH_MAX_PARALLEL (fallback BATCH_CONCURRENCY)
+    const CONC = Math.max(1, Number(process.env.BATCH_MAX_PARALLEL ?? process.env.BATCH_CONCURRENCY ?? 8));
 
     let cursor = 0;
     async function runOne() {
@@ -375,7 +407,8 @@ async function handleStart(req, res) {
 
       let ok = false, meta = null, errMsg = '';
       try {
-        const tr = await transcribeAudio(file.buffer, { provider });
+        const audioBuf = await getFileBuffer(file);
+        const tr = await transcribeAudio(audioBuf, { provider });
 
         let transcriptMarked = '';
         const marked = Array.isArray(tr?.linesRoleLabeled) ? tr.linesRoleLabeled : [];
@@ -427,6 +460,8 @@ async function handleStart(req, res) {
       } catch (e) {
         ok = false;
         errMsg = String(e?.message || e);
+      } finally {
+        await cleanupUploaded(file); // limpia archivo temporal si aplica
       }
 
       const item = job.items[i];

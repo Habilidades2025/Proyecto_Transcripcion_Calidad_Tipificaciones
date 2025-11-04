@@ -6,7 +6,7 @@ import fs from 'fs';
 import path from 'path';
 
 import xlsxPkg from 'xlsx'; // XLSX para generar Excel
-const XLSX = xlsxPkg?.default ?? xlsxPkg;
+const XLSX = (xlsxPkg?.default ?? xlsxPkg);
 
 import {
   listAudits,
@@ -27,6 +27,21 @@ const REPORTS_BATCH_DIR = path.join(REPORTS_DIR, 'batches');
 // === Helpers ===
 function ensureDir(d) { if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true }); }
 function toInt(v, def) { const n = Number(v); return Number.isFinite(n) ? n : def; }
+function basenameNoExt(s='') { return String(s).replace(/\.[a-z0-9]{1,4}$/i,''); }
+
+function ddmmyyyyFromISO(dateStr='') {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(dateStr));
+  return m ? `${m[3]}/${m[2]}/${m[1]}` : '';
+}
+const BLANK_RE = /^[\s\u00A0\u200B\u200C\u200D\uFEFF]*$/;
+function sanitizeMaybeBlank(v) {
+  if (v == null) return undefined;
+  if (typeof v === 'string') {
+    const t = v.replace(/[\u00A0\u200B\u200C\u200D\uFEFF]/g, ' ').trim();
+    return t.length ? t : undefined;
+  }
+  return v;
+}
 
 // consolidado seguro: raíz -> analisis.consolidado -> {}
 function getConsolidado(audit) {
@@ -55,6 +70,34 @@ function splitAffected(consolidado) {
   return { criticos, noCriticos };
 }
 
+/* ===== Parseo de nombre de archivo =====
+   Esperado: DOC_ASESOR_YYYY-MM-DD_HH_MM_SS_NUMCLIENTE_TMO
+   Ej: "52848062_2025-10-01_10_16_33_3045254978_455" */
+function parseCallNameFields(name='') {
+  const base = basenameNoExt(name);
+  const parts = base.split('_').filter(Boolean);
+  const dateIdx = parts.findIndex(p => /^\d{4}-\d{2}-\d{2}$/.test(p));
+
+  if (dateIdx === -1) return { doc:'', date:'', time:'', client:'', tmo:'' };
+
+  const doc    = parts[0] || '';
+  const date   = parts[dateIdx] || '';
+  const time   = (parts[dateIdx+1] && parts[dateIdx+2] && parts[dateIdx+3])
+    ? `${parts[dateIdx+1]}:${parts[dateIdx+2]}:${parts[dateIdx+3]}`
+    : '';
+  const client = (parts[dateIdx+4] && /^\d+$/.test(parts[dateIdx+4])) ? parts[dateIdx+4] : '';
+  let tmo      = (parts[dateIdx+5] && /^\d+$/.test(parts[dateIdx+5])) ? parts[dateIdx+5] : '';
+
+  if (!tmo) {
+    const m = base.match(/_(\d{1,6})$/);
+    if (m) tmo = m[1];
+  }
+  return { doc, date, time, client, tmo };
+}
+
+/* ===== Formateo de fraude =====
+   buildFraudString(): para MD (con riesgo y cita)
+   NUEVO listFraudPlainTypes(): para Excel (solo el tipo; sin emoji, sin riesgo, sin cita) */
 function buildFraudString(analisis) {
   if (!analisis || !Array.isArray(analisis?.fraude?.alertas)) return '';
   return analisis.fraude.alertas
@@ -65,6 +108,31 @@ function buildFraudString(analisis) {
       return `[${riesgo}] ${tipo}${cita ? ` — "${cita}"` : ''}`;
     })
     .join(' | ');
+}
+function _normAlertKeyByType(a) {
+  const t = String(a?.tipo || '').toLowerCase().trim();
+  return t;
+}
+function listFraudPlainTypes(analisis) {
+  const src = Array.isArray(analisis?.fraude?.alertas) ? analisis.fraude.alertas : [];
+  const seen = new Set();
+  const out = [];
+  for (const a of src) {
+    const k = _normAlertKeyByType(a);
+    if (!k || seen.has(k)) continue;
+    seen.add(k);
+    out.push(String(a?.tipo || '').replace(/_/g, ' ').trim());
+  }
+  return out;
+}
+
+/* ===== “Llamada mal tipificada” (razón o vacío) ===== */
+function getMalTipificadaText(analisis) {
+  if (!analisis) return undefined;
+  const isBad = (analisis?.llamada_mal_tipificada === true) || (analisis?.tipificacion_valida === false);
+  if (!isBad) return undefined;
+  const reason = String(analisis?.motivo_mal_tipificada || analisis?.motivo_no_aplica || '').trim();
+  return reason || 'Sí';
 }
 
 /** Genera un MD de una auditoría individual (sin guardar a disco) */
@@ -173,10 +241,10 @@ router.get('/audits/export.json', (req, res) => {
 });
 
 // === Export a Excel (con paginación opcional) ===
-// Requisitos:
-// - Columna nueva "ID de la llamada" (numérica, secuencial desde 1)
-// - La columna que antes era "ID de la llamada" pasa a "Nombre de la llamada"
-// - Una fila por cada "Atributo crítico afectado" (si hay varios, mismo ID repetido)
+// Requisitos extra:
+// - Parsear "Nombre de la llamada" para llenar Documento (misma columna), Número cliente, TMO y Fecha (DD/MM/AAAA).
+// - Una fila por cada crítico/alerta (pareo por índice).
+// - Escribir celdas REALMENTE vacías (undefined) para no romper fórmulas/filtros.
 router.get('/audits/export.xlsx', (req, res) => {
   const hasPaging = (req.query.offset !== undefined) || (req.query.limit !== undefined);
   let items = [];
@@ -188,8 +256,6 @@ router.get('/audits/export.xlsx', (req, res) => {
     items = listAudits();
   }
 
-  // Asignar ID secuencial por llamada (1..N) según el orden actual del listado
-  // Luego expandimos a "una fila por crítico" conservando el mismo ID para esa llamada
   const rows = [];
   items.forEach((it, idx) => {
     const idSecuencial = idx + 1; // inicia en 1
@@ -199,62 +265,80 @@ router.get('/audits/export.xlsx', (req, res) => {
       ? cons.afectadosCriticos
       : splitAffected(cons).criticos;
 
-    const fecha       = it?.metadata?.timestamp ? new Date(it.metadata.timestamp).toLocaleString() : '';
-    const agente      = it?.metadata?.agentName    || it?.analisis?.agent_name  || '';
-    const cliente     = it?.metadata?.customerName || it?.analisis?.client_name || '';
-    const campania    = it?.metadata?.campania     || '';
-    const tipificacion= it?.metadata?.tipificacion || '';
-    const nombreLlamada = it?.metadata?.callId ?? ''; // ahora "Nombre de la llamada"
-    const resumen     = it?.analisis?.resumen ? String(it.analisis.resumen).replace(/\s+/g, ' ').trim() : '';
-    const fraude      = buildFraudString(it?.analisis);
-    const nota        = cons?.notaFinal ?? '';
+    const fraudeList  = listFraudPlainTypes(it?.analisis);
 
-    if (afectados.length > 0) {
-      for (const atributo of afectados) {
-        rows.push({
-          'ID de la llamada': idSecuencial,         // NUEVO ID secuencial
-          'Nombre de la llamada': nombreLlamada,    // antes "ID de la llamada"
-          'Fecha': fecha,
-          'Agente': agente,
-          'Cliente': cliente,
-          'Campaña': campania,
-          'Tipificación': tipificacion,
-          'Nota': nota,
-          'Atributo crítico afectado': atributo,
-          'Alerta de fraude': fraude,
-          'Resumen': resumen
-        });
-      }
-    } else {
-      // Sin críticos: generamos una fila igualmente, con atributo vacío
+    const callName    = it?.metadata?.callId ?? '';
+    const parsed      = parseCallNameFields(callName);
+    const nombreDoc   = parsed.doc || callName; // si no parsea, dejamos el callId completo
+
+    // Fecha preferida: del nombre. Fallback al timestamp.
+    let fechaFmt = ddmmyyyyFromISO(parsed.date);
+    if (!fechaFmt && it?.metadata?.timestamp) {
+      try {
+        const d = new Date(it.metadata.timestamp);
+        const dd = `${d.getDate()}`.padStart(2,'0');
+        const mm = `${d.getMonth()+1}`.padStart(2,'0');
+        const yy = d.getFullYear();
+        fechaFmt = `${dd}/${mm}/${yy}`;
+      } catch {}
+    }
+
+    const agente      = it?.metadata?.agentName    || it?.analisis?.agent_name  || undefined;
+    const clienteNom  = it?.metadata?.customerName || it?.analisis?.client_name || undefined;
+    const campania    = it?.metadata?.campania     || undefined;
+    const tipificacion= it?.metadata?.tipificacion || undefined;
+    const resumen     = it?.analisis?.resumen ? String(it.analisis.resumen).replace(/\s+/g, ' ').trim() : undefined;
+    const nota        = (cons?.notaFinal ?? undefined);
+    const malTipTxt   = getMalTipificadaText(it?.analisis); // razón o vacío
+
+    const nCrit  = afectados.length;
+    const nFraud = fraudeList.length;
+    const nRows  = Math.max(nCrit, nFraud, 1);
+
+    for (let i = 0; i < nRows; i++) {
       rows.push({
         'ID de la llamada': idSecuencial,
-        'Nombre de la llamada': nombreLlamada,
-        'Fecha': fecha,
-        'Agente': agente,
-        'Cliente': cliente,
-        'Campaña': campania,
-        'Tipificación': tipificacion,
-        'Nota': nota,
-        'Atributo crítico afectado': '',
-        'Alerta de fraude': fraude,
-        'Resumen': resumen
+        'Nombre de la llamada': sanitizeMaybeBlank(nombreDoc) ?? undefined, // DOC asesor
+        'Número cliente': sanitizeMaybeBlank(parsed.client) ?? undefined,    // desde el nombre
+        'TMO': parsed.tmo === '' ? undefined : Number(parsed.tmo) || parsed.tmo,
+        'Fecha': sanitizeMaybeBlank(fechaFmt) ?? undefined,                  // DD/MM/AAAA
+        'Agente': sanitizeMaybeBlank(agente),
+        'Cliente': sanitizeMaybeBlank(clienteNom),
+        'Campaña': sanitizeMaybeBlank(campania),
+        'Tipificación': sanitizeMaybeBlank(tipificacion),
+        'Nota': (nota === '' ? undefined : nota),
+        'Atributo crítico afectado': (i < nCrit ? sanitizeMaybeBlank(afectados[i]) : undefined),
+        'Alerta de fraude': (i < nFraud ? sanitizeMaybeBlank(fraudeList[i]) : undefined),
+        'Resumen': (i === 0 ? sanitizeMaybeBlank(resumen) : undefined),
+        'Llamada mal tipificada': (i === 0 ? sanitizeMaybeBlank(malTipTxt) : undefined)
       });
     }
   });
 
+  // Limpieza adicional de invisibles: elimina claves que sean solo espacios/invisibles
+  for (const r of rows) {
+    for (const k of Object.keys(r)) {
+      const v = r[k];
+      if (v == null) { delete r[k]; continue; }
+      if (typeof v === 'string' && BLANK_RE.test(v)) delete r[k];
+    }
+  }
+
   const headers = [
-    'ID de la llamada',           // numérico, secuencial
-    'Nombre de la llamada',       // antes: ID de la llamada (string)
-    'Fecha',
+    'ID de la llamada',
+    'Nombre de la llamada', // documento asesor
+    'Número cliente',
+    'TMO',
+    'Fecha',                // DD/MM/AAAA (del nombre)
     'Agente',
     'Cliente',
     'Campaña',
     'Tipificación',
     'Nota',
-    'Atributo crítico afectado',  // una fila por cada crítico
+    'Atributo crítico afectado',
     'Alerta de fraude',
     'Resumen',
+    'Llamada mal tipificada',
   ];
 
   const wb = XLSX.utils.book_new();
@@ -268,7 +352,6 @@ router.get('/audits/export.xlsx', (req, res) => {
 });
 
 // === Servir reportes MD (individuales o de lote) ===
-// 1) rutas explícitas (por si decides usarlas)
 router.get('/audits/files/calls/:callId.md', (req, res) => {
   const callId = req.params.callId.replace(/\.md$/, '');
   const abs = path.join(REPORTS_CALL_DIR, `${callId}.md`);

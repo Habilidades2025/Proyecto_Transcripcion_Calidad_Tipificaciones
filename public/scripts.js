@@ -21,14 +21,30 @@ function downloadBlob(blob, filename) {
 function escapeHtml(s) {
   return String(s || '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 }
+
+/* ==== NUEVO: deduplicador de alertas por tipo|cita (case-insensitive) ==== */
+function uniqAlerts(alerts = []) {
+  if (!Array.isArray(alerts)) return [];
+  const seen = new Set();
+  const out = [];
+  for (const a of alerts) {
+    const tipo = String(a?.tipo || '').toLowerCase().trim();
+    const cita = String(a?.cita || '').toLowerCase().trim();
+    const k = `${tipo}||${cita}`;
+    if (!seen.has(k)) { seen.add(k); out.push(a); }
+  }
+  return out;
+}
+
+/* ==== MOD: formato de alerta SIN niveles de riesgo ==== */
 function formatFraudItem(f) {
   if (!f) return '';
   if (typeof f === 'string') return `🚫 ${escapeHtml(f)}`;
-  const tipo   = String(f.tipo || '').replace(/_/g, ' ');
-  const riesgo = (f.riesgo || 'alto').toUpperCase();
-  const cita   = String(f.cita || '').trim();
-  return `🚫 [${riesgo}] ${escapeHtml(tipo)}${cita ? ` — “${escapeHtml(cita)}”` : ''}`;
+  const tipo = String(f.tipo || 'alerta').replace(/_/g, ' ').replace(/\s+/g, ' ').trim();
+  const cita = String(f.cita || '').trim();
+  return `🚫 ${escapeHtml(tipo)}${cita ? ` — “${escapeHtml(cita)}”` : ''}`;
 }
+
 function numOrDash(n) { const v = Number(n); return Number.isFinite(v) ? Math.round(v) : '-'; }
 
 // Helpers defensivos
@@ -442,10 +458,13 @@ function aggregateGroupV2(items, opts = {}) {
     (a?.fraude?.alertas || []).forEach(x => fraudes.push(x));
   });
 
+  // ==== MOD: dedup de fraude y sin niveles en UI (se maneja en formatFraudItem) ====
+  const fraudesDedup = uniqAlerts(fraudes);
+
   out.promedio = nNotas ? Math.round(sum / nNotas) : 0;
   out.hallTop = Array.from(hallCounts.entries()).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([text,count])=>`${text} (${count})`);
   out.afectadosTop = Array.from(afCounts.entries()).sort((a,b)=>b[1]-a[1]).slice(0,10).map(([text,count])=>({ text, count }));
-  out.fraudeTop = fraudes.slice(0,10);
+  out.fraudeTop = fraudesDedup.slice(0,10);
 
   // resumen sintético
   const h1 = out.hallTop[0]?.replace(/\s\(\d+\)$/, '') || '';
@@ -478,7 +497,9 @@ function renderBatchResultsNew(payload) {
     const cliente   = analisis?.client_name || '-';
     const resumen   = analisis?.resumen || '';
     const hallazgos = analisis?.hallazgos || [];
-    const fraude    = (analisis?.fraude?.alertas || []).map(formatFraudItem);
+    // ==== MOD: dedup alertas individual ====
+    const fraudeArr = uniqAlerts(analisis?.fraude?.alertas || []);
+    const fraude    = fraudeArr.map(formatFraudItem);
     const transcriptMarked = String(it?.transcriptMarked || '').trim();
 
     const det = document.createElement('details');
@@ -540,7 +561,9 @@ function renderBatchResults(result) {
     const campania = pick(meta, 'metadata.campania') || pick(meta, 'campania') || '';
     const tipificacion = pick(meta, 'metadata.tipificacion') || pick(meta, 'tipificacion') || '';
 
-    const fraude = (pick(analisis, 'fraude.alertas') || []).map(formatFraudItem);
+    // ==== MOD: dedup alertas individual (SSE) ====
+    const fraudeArr = uniqAlerts(pick(analisis, 'fraude.alertas') || []);
+    const fraude = fraudeArr.map(formatFraudItem);
 
     const porAtrib = flattenPorAtrib(meta);
     const mejoras = porAtrib.filter(a => a && a.aplica !== false && a.cumplido === false && a.mejora)
@@ -606,11 +629,12 @@ function renderBatchResults(result) {
     const arr = pick(it, 'meta.analisis.fraude.alertas') || [];
     arr.forEach(x => fraudesGrupo.push(x));
   });
-  const hasFraud = fraudesGrupo.length > 0;
+  const fraudesGrupoDedup = uniqAlerts(fraudesGrupo);
+  const hasFraud = fraudesGrupoDedup.length > 0;
   if ($grpFraudeCard) $grpFraudeCard.style.display = hasFraud ? '' : 'none';
   if ($grpFraudeList) {
     $grpFraudeList.innerHTML = hasFraud
-      ? fraudesGrupo.slice(0, 10).map(x => `<li>${formatFraudItem(x)}</li>`).join('')
+      ? fraudesGrupoDedup.slice(0, 10).map(x => `<li>${formatFraudItem(x)}</li>`).join('')
       : '';
   }
 }

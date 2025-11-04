@@ -26,25 +26,60 @@ function cleanName(x = '') {
 const OFFICIAL_PAY_CHANNELS = (process.env.OFFICIAL_PAY_CHANNELS || 'link de pago,PSE,portal oficial,oficinas autorizadas')
   .split(',').map(s => s.trim()).filter(Boolean);
 
+/**
+ * Heurística actualizada:
+ * - Solo devuelve los 4 tipos definidos y SIN "riesgo":
+ *   1) "No dice número de cuenta"
+ *   2) "Dice número de cuenta parcialmente"
+ *   3) "Dice número de cuenta diferente"
+ *   4) "Indica al cliente que le va a marcar desde otro número"
+ */
 function detectFraudHeuristics(transcriptText = '') {
   const txt = String(transcriptText || '');
   if (!txt) return [];
   const out = [];
-  const push = (tipo, cita, riesgo = 'alto') => {
+  const push = (tipo, cita) => {
     if (!tipo || !cita) return;
-    out.push({ tipo, cita: String(cita).trim().slice(0, 200), riesgo });
+    out.push({ tipo, cita: String(cita).trim().slice(0, 200) });
   };
   const around = (i) => txt.slice(Math.max(0, i - 60), Math.min(txt.length, i + 120)).replace(/\s+/g, ' ').trim();
 
-  // A) Números alternos / WhatsApp personal
-  const reAltNum = /\b(me\s+voy\s+a\s+comunicar|le\s+(?:escribo|llamo))\s+de\s+otro\s+n[úu]mero\b|\bn[úu]mero\s+personal\b|\bmi\s+(?:whatsapp|celular)\s+es\b/ig;
+  // A) Indica al cliente que le va a marcar desde otro número
+  const reAltNum = /\b(le\s+(?:voy\s+a\s+)?marcar|le\s+marco|te\s+marco|te\s+llamo|le\s+llamo)\s+desde\s+otro\s+n[úu]mero\b|\bmi\s+(?:whatsapp|celular)\s+es\b|\bn[úu]mero\s+personal\b/ig;
   let m;
-  while ((m = reAltNum.exec(txt)) !== null) push('contacto_numero_no_oficial', around(m.index));
+  while ((m = reAltNum.exec(txt)) !== null) push('Indica al cliente que le va a marcar desde otro número', around(m.index));
 
-  // B) Cuentas / consignaciones directas a cuentas no oficiales
-  const reCuenta = /\b(cuenta(?:\s+de\s+(?:ahorros|corriente))?|consignar|consignación|transferir|dep[oó]sitar|nequi|daviplata|bancolombia|davivienda|bbva|colpatria|banco\s+de\s+bog[oó]t[aá]|efecty|baloto)\b[\s\S]{0,60}(\b\d[\d\s-]{6,}\b)/ig;
-  while ((m = reCuenta.exec(txt)) !== null) push('cuenta_no_oficial', around(m.index));
+  // B) Cuentas / consignaciones: detectar contexto de pago
+  const reContextoBanco = /\b(cuenta|ahorros|corriente|consignar|consignación|transferir|depositar|dep[oó]sito|bancolombia|davivienda|bbva|colpatria|bog[oó]ta|efecty|baloto|nequi|daviplata|convenio)\b/i;
+  const hayContextoBanco = reContextoBanco.test(txt);
 
+  // ¿Hay dígitos?
+  const hayDigitos = /\d[\d\s.-]{2,}/.test(txt);
+
+  if (hayContextoBanco && !hayDigitos) {
+    push('No dice número de cuenta', txt.slice(0, 200));
+  }
+
+  // C) Parcial vs diferente
+  const reCuenta = /\b(cuenta(?:\s+de\s+(?:ahorros|corriente))?|consignar|consignación|transferir|dep[oó]sitar|nequi|daviplata|bancolombia|davivienda|bbva|colpatria|banco\s+de\s+bog[oó]t[aá]|efecty|baloto|convenio)\b[\s\S]{0,60}(\b\d[\d\s.-]{1,}\b)/ig;
+  const onlyDigits = (s='') => String(s).replace(/\D/g, '');
+  const looksMasked = (s='') => /(?:\*|x){2,}|termina(?:do)?\s+en\s+\d{2,4}/i.test(String(s));
+
+  while ((m = reCuenta.exec(txt)) !== null) {
+    const crudo = m[2];
+    const dig = onlyDigits(crudo);
+    if (looksMasked(crudo) || dig.length < 8) {
+      push('Dice número de cuenta parcialmente', around(m.index));
+    } else {
+      if (dig.length >= 8 && dig.length <= 14) {
+        push('Dice número de cuenta diferente', around(m.index));
+      } else {
+        push('Dice número de cuenta parcialmente', around(m.index));
+      }
+    }
+  }
+
+  // dedup
   const seen = new Set();
   return out.filter(a => {
     const k = a.tipo + '|' + a.cita;
@@ -158,7 +193,6 @@ const POSIBLENEG_ITEMS = [
 ];
 
 const RENUENTES_ITEMS = [
-  // 10 ítems (ya sin “confirmación completa”)
   '1. Informa beneficios y consecuencias de no pago',
   '2. Indaga motivo del no pago',
   '3. Solicita autorización para contacto por otros medios',
@@ -170,6 +204,41 @@ const RENUENTES_ITEMS = [
   '9. Evita argumentos engañosos con el cliente',
   '10. Utiliza vocabulario prudente y respetuoso'
 ];
+
+function getItemsForType(type) {
+  switch (type) {
+    case 'novacion':             return NOVACION_ITEMS;
+    case 'propuesta_pago':       return PP_ITEMS;
+    case 'abono':                return ABONO_ITEMS;
+    case 'pago_cuotas':          return PAGO_CUOTAS_ITEMS;
+    case 'posible_negociacion':  return POSIBLENEG_ITEMS;
+    case 'renuente':             return RENUENTES_ITEMS;
+    default:                     return [];
+  }
+}
+
+
+/* ===== Mapa de ítems por tipificación ===== */
+const ITEMS_BY_TIPKEY = {
+  'novacion': NOVACION_ITEMS,
+  'novación': NOVACION_ITEMS,
+  'propuesta de pago': PP_ITEMS,
+  'propuesta_pago': PP_ITEMS,
+  'abono': ABONO_ITEMS,
+  'pago a cuotas': PAGO_CUOTAS_ITEMS,
+  'pago_a_cuotas': PAGO_CUOTAS_ITEMS,
+  'pago cuotas': PAGO_CUOTAS_ITEMS,
+  'posible negociacion': POSIBLENEG_ITEMS,
+  'posible_negociacion': POSIBLENEG_ITEMS,
+  'renuentes': RENUENTES_ITEMS,
+  'renuente': RENUENTES_ITEMS,
+  'cliente renuente': RENUENTES_ITEMS,
+  'cliente_renuente': RENUENTES_ITEMS
+};
+function getItemsForTipKey(tipKey = '') {
+  const k = keyTipi(tipKey);
+  return ITEMS_BY_TIPKEY[k] || [];
+}
 
 /* =============== Prompts específicos por caso =============== */
 function strictEvidenceBlock() {
@@ -198,8 +267,7 @@ DECISIÓN PREVIA:
   - "novacion.aceptada": false
   - "novacion.motivo_no_aplica": "No aplica — sin aceptación formal de novación."
   - En "consolidado.porAtributo": marca todos "aplica": false
-  - "consolidado.notaFinal": 0
-  - En "fraude.alertas": { "tipo":"novacion_invalida", "riesgo":"alto", "cita":"frase breve verificable" }
+  - "consolidado.notaFinal": 100 (no penaliza por mal tipificación)
   - FIN.
 
 ${strictEvidenceBlock()}
@@ -213,10 +281,11 @@ CÁLCULO DE NOTA (binaria):
 • Si **todos** los aplicables tienen "cumplido": true → **notaFinal = 100**.
 • Si ningún ítem aplica (caso raro), notaFinal = 100 (no penaliza).
 
-FRAUDE:
-• Además de “novacion_invalida”, marca:
-  - "cuenta_no_oficial" cuando pidan consignar/transferir a canal NO oficial.
-  - "contacto_numero_no_oficial" por números personales o WhatsApp personal.
+FRAUDE (solo tipos permitidos + "cita"):
+• "No dice número de cuenta"
+• "Dice número de cuenta parcialmente"
+• "Dice número de cuenta diferente"
+• "Indica al cliente que le va a marcar desde otro número"
 `.trim();
 }
 
@@ -231,7 +300,7 @@ DECISIÓN PREVIA:
   - "propuesta_pago.aceptada": false
   - "propuesta_pago.motivo_no_aplica": "No aplica — sin propuesta de pago."
   - Marca todos los ítems con "aplica": false
-  - "consolidado.notaFinal": 0
+  - "consolidado.notaFinal": 100 (no penaliza por mal tipificación)
   - FIN.
 
 ${strictEvidenceBlock()}
@@ -255,9 +324,11 @@ CÁLCULO DE NOTA (binaria):
 • Si **todos** los aplicables son "cumplido=true" → **notaFinal = 100**.
 • Si nada aplica, **notaFinal = 100**.
 
-FRAUDE:
-• Canales NO oficiales de pago → "cuenta_no_oficial".
-• Contactos NO oficiales (número personal/WhatsApp) → "contacto_numero_no_oficial".
+FRAUDE (solo tipos permitidos + "cita"):
+• "No dice número de cuenta"
+• "Dice número de cuenta parcialmente"
+• "Dice número de cuenta diferente"
+• "Indica al cliente que le va a marcar desde otro número"
 `.trim();
 }
 
@@ -271,7 +342,7 @@ DECISIÓN PREVIA:
 • Marca "abono.aceptado": true SOLO si:
   A) hay **acuerdo vigente**, y
   B) hay **compromiso de pago parcial** (ideal con monto/fecha y canal oficial).
-• Si NO: "abono.aceptado": false; todos "aplica": false; "notaFinal": 0; FIN.
+• Si NO: "abono.aceptado": false; todos "aplica": false; "notaFinal": 100 (no penaliza por mal tipificación); FIN.
 
 ${strictEvidenceBlock()}
 
@@ -284,9 +355,11 @@ CÁLCULO DE NOTA (binaria):
 • Todos true → **100**.
 • Ninguno aplica → **100**.
 
-FRAUDE:
-• "cuenta_no_oficial" cuando pidan consignar a canal NO oficial.
-• "contacto_numero_no_oficial" por números/WhatsApp personales.
+FRAUDE (solo tipos permitidos + "cita"):
+• "No dice número de cuenta"
+• "Dice número de cuenta parcialmente"
+• "Dice número de cuenta diferente"
+• "Indica al cliente que le va a marcar desde otro número"
 `.trim();
 }
 
@@ -297,7 +370,7 @@ EVALUACIÓN ESPECÍFICA — PAGO A CUOTAS (Carteras Propias)
 Definición: plan en cuotas con **número de cuotas**, **valor por cuota**, **fecha de inicio** y (si aparece) **canal oficial**.
 
 DECISIÓN PREVIA:
-• Si **NO** hay aceptación formal: "pago_cuotas.aceptado": false; todas "aplica": false; nota 0; FIN.
+• Si **NO** hay aceptación formal: "pago_cuotas.aceptado": false; todas "aplica": false; nota 100 (no penaliza por mal tipificación); FIN.
 
 ${strictEvidenceBlock()}
 
@@ -319,6 +392,12 @@ ${PAGO_CUOTAS_ITEMS.map(s => `- ${s}`).join('\n')}
 
 CÁLCULO DE NOTA:
 • Algún aplicable false → 0; todos true → 100; nada aplica → 100.
+
+FRAUDE (solo tipos permitidos + "cita"):
+• "No dice número de cuenta"
+• "Dice número de cuenta parcialmente"
+• "Dice número de cuenta diferente"
+• "Indica al cliente que le va a marcar desde otro número"
 `.trim();
 }
 
@@ -332,7 +411,7 @@ DECISIÓN PREVIA:
 • Si **NO** hay señales claras de posible negociación:
   - "posible_negociacion.aplica": false
   - "posible_negociacion.motivo_no_aplica": "No aplica — sin posible negociación."
-  - Todas "aplica": false; "notaFinal": 0; FIN.
+  - Todas "aplica": false; "notaFinal": 100 (no penaliza por mal tipificación); FIN.
 
 ${strictEvidenceBlock()}
 
@@ -353,9 +432,11 @@ REGLAS POR ÍTEM:
 CÁLCULO DE NOTA:
 • Solo ítems con "aplica": true. Algún false → 0; todos true → 100; nada aplica → 100.
 
-FRAUDE:
-• "cuenta_no_oficial" ante consignación a canal NO oficial.
-• "contacto_numero_no_oficial" por número/WhatsApp personal.
+FRAUDE (solo tipos permitidos + "cita"):
+• "No dice número de cuenta"
+• "Dice número de cuenta parcialmente"
+• "Dice número de cuenta diferente"
+• "Indica al cliente que le va a marcar desde otro número"
 `.trim();
 }
 
@@ -366,7 +447,7 @@ EVALUACIÓN — CLIENTE RENUENTE (Carteras Propias)
 Definición: el titular evita comprometerse (resistencia activa/pasiva).
 
 DECISIÓN PREVIA:
-• Si no hay renuencia: "renuente.aplica": false; todas "aplica": false; nota 0; FIN.
+• Si no hay renuencia: "renuente.aplica": false; todas "aplica": false; nota 100 (no penaliza por mal tipificación); FIN.
 
 ${strictEvidenceBlock()}
 
@@ -379,6 +460,12 @@ ${RENUENTES_ITEMS.map(s => `- ${s}`).join('\n')}
 
 CÁLCULO:
 • Algún aplicable false → 0; todos true → 100; nada aplica → 100.
+
+FRAUDE (solo tipos permitidos + "cita"):
+• "No dice número de cuenta"
+• "Dice número de cuenta parcialmente"
+• "Dice número de cuenta diferente"
+• "Indica al cliente que le va a marcar desde otro número"
 `.trim();
 }
 
@@ -401,9 +488,14 @@ function deriveAffectedCriticos(porAtrib = []) {
     .filter(Boolean);
 }
 
-/** Regla binaria 100/0; si no aceptado → 0; si no hay aplicables → 100 (no penaliza) */
+/** Regla binaria 100/0
+ * - Si NO aceptado (mal tipificada) → **100** (NO penaliza)
+ * - Si no hay aplicables → **100**
+ * - Si alguno aplicable falla → **0**
+ * - Si todos aplicables cumplen → **100**
+ */
 function computeBinaryScore(porAtrib = [], accepted = true) {
-  if (!accepted) return 0;
+  if (!accepted) return 100;             // NO penaliza mal tipificación
   const aplicables = porAtrib.filter(a => a.aplica === true);
   if (aplicables.length === 0) return 100;
   const anyFail = aplicables.some(a => a.cumplido === false);
@@ -414,61 +506,93 @@ function ensureBlock(list, _labels) {
   return normalizePorAtributo(Array.isArray(list) ? list : []);
 }
 
-function ensureConsolidadoForType(analisis = {}, type) {
-  let accepted = true;
-  let rawPorAttr = [];
+/** Construye un porAtributo por defecto para asegurar visibilidad en reportes */
+function buildDefaultPorAtributo(tipKey, { accepted }) {
+  const labels = getItemsForTipKey(tipKey);
+  const none = labels.map(atributo => ({
+    atributo,
+    // Si NO está aceptada (mal tipificada), no aplica y no penaliza.
+    aplica: accepted ? true : false,
+    // Si está aceptada y no hay evidencia, marcamos no cumplido (visibilidad).
+    cumplido: accepted ? false : true,
+    justificacion: accepted ? 'no_evidencia' : 'no_aplica',
+    mejora: ''
+  }));
+  return none;
+}
 
-  if (type === 'novacion') {
-    accepted = analisis?.novacion?.aceptada !== false;
-    rawPorAttr = analisis?.consolidado?.porAtributo;
-    if (analisis?.novacion && analisis.novacion.aceptada === false) {
-      const list = Array.isArray(analisis?.fraude?.alertas) ? analisis.fraude.alertas : [];
-      const has = list.some(a => a?.tipo === 'novacion_invalida');
-      if (!has) {
-        (analisis.fraude = analisis.fraude || {}).alertas = list.concat([{
-          tipo: 'novacion_invalida',
-          riesgo: 'alto',
-          cita: 'No hay aceptación expresa de novación, pero se intenta cerrar.'
-        }]);
-      }
-    }
+/** ===== Segundo pase: obligar porAtributo ===== */
+async function secondPassPorAtributo({ client, model, transcript, tipKey }) {
+  const labels = getItemsForTipKey(tipKey);
+  if (!labels.length) return [];
+
+  const onlyJson = `
+Devuelve SOLO este JSON con EXACTAMENTE ${labels.length} elementos en ese orden:
+
+{
+  "porAtributo": [
+    ${labels.map(t => `{"atributo":"${t.replace(/"/g,'\\"')}","aplica":true,"cumplido":false,"justificacion":"no_evidencia","mejora":""}`).join(',\n    ')}
+  ]
+}
+
+REGLAS:
+- Usa esos títulos tal cual y en ese ORDEN.
+- Si hay evidencia literal (≈8+ palabras) + tiempo, pon "cumplido=true" y cita en "justificacion".
+- Si no hay evidencia, deja "cumplido=false" y "justificacion":"no_evidencia".
+- Si realmente no aplica, usa "aplica=false" y "justificacion":"no_aplica".
+- NO devuelvas arreglos vacíos. NO agregues ni quites campos.
+`.trim();
+
+  const sys = `
+Eres auditor. Construye únicamente el bloque "porAtributo" para evaluación de calidad de llamadas.
+Cita literal cuando cumplido=true; si no hay evidencia, usa "no_evidencia".
+`.trim();
+
+  const user = `
+Tipificación: ${tipKey}
+Transcripción:
+${String(transcript || '').slice(0, Number(process.env.ANALYSIS_MAX_INPUT_CHARS) || 20000)}
+
+${onlyJson}
+`.trim();
+
+  const completion = await client.chat.completions.create({
+    model,
+    temperature: 0.1,
+    max_tokens: Math.min(Number(process.env.ANALYSIS_MAX_TOKENS_2ND_PASS) || 1000, 1500),
+    response_format: { type: 'json_object' },
+    messages: [
+      { role: 'system', content: sys },
+      { role: 'user', content: user }
+    ]
+  });
+
+  const raw = completion.choices?.[0]?.message?.content || '';
+  const obj = forceJson(raw);
+  const arr = Array.isArray(obj?.porAtributo) ? obj.porAtributo : [];
+  return normalizePorAtributo(arr);
+}
+
+/** Si el modelo no trajo porAtributo, intenta segundo pase; si falla, usa fallback local. */
+async function ensureItemsBlock({
+  analisis, client, model, transcript, tipKey, accepted
+}) {
+  const already = Array.isArray(analisis?.consolidado?.porAtributo) && analisis.consolidado.porAtributo.length > 0;
+  if (already) return analisis;
+
+  let arr = await secondPassPorAtributo({ client, model, transcript, tipKey });
+  if (!arr.length) {
+    arr = buildDefaultPorAtributo(tipKey, { accepted });
+    analisis._warn_por_atributo = 'fallback_local';
+  } else {
+    analisis._warn_por_atributo = 'second_pass_ok';
   }
-
-  if (type === 'propuesta_pago') {
-    accepted = analisis?.propuesta_pago?.aceptada !== false;
-    rawPorAttr = analisis?.consolidado?.porAtributo;
-  }
-
-  if (type === 'abono') {
-    accepted = analisis?.abono?.aceptado !== false;
-    rawPorAttr = analisis?.consolidado?.porAtributo;
-  }
-
-  if (type === 'pago_cuotas') {
-    accepted = analisis?.pago_cuotas?.aceptado !== false;
-    rawPorAttr = analisis?.consolidado?.porAtributo;
-  }
-
-  if (type === 'posible_negociacion') {
-    accepted = analisis?.posible_negociacion?.aplica !== false;
-    rawPorAttr = analisis?.consolidado?.porAtributo;
-  }
-
-  if (type === 'renuente') {
-    accepted = analisis?.renuente?.aplica !== false;
-    rawPorAttr = analisis?.consolidado?.porAtributo;
-  }
-
-  const porAtributo = ensureBlock(rawPorAttr);
-  const nota = computeBinaryScore(porAtributo, accepted);
-  const afectadosCriticos = deriveAffectedCriticos(porAtributo);
 
   analisis.consolidado = {
     ...(analisis.consolidado || {}),
-    notaFinal: nota,
-    porAtributo,
-    afectadosCriticos
+    porAtributo: arr
   };
+  analisis.porAtributo = arr; // compat
   return analisis;
 }
 
@@ -500,21 +624,13 @@ function containsAgentIdPhrase(s='') {
   const t = norm(s);
   return (
     t.includes('recuerde que le hablo') ||
-    t.includes('recuerde que le hablo') ||
-    t.includes('le hablo ') || t.includes('le hablo,') ||
-    t.includes('le hablo.') || t.includes('le hablo;') ||
-    t.includes('le hablo') || t.includes('le hablo') ||
-    t.includes('le hablo') ||
-    t.includes('le hablo') ||
-    t.includes('le habló') || t.includes('le hablo') || t.includes('le hablo') ||
+    t.includes('le hablo ') || t.includes('le habló') ||
     t.includes('hablo con') || t.includes('habló con') ||
     t.includes('soy ') || t.includes('mi nombre')
   );
 }
 function findFarewellEvidence(just='', transcript='') {
-  // 1) ¿Ya viene en la justificación?
   if (just && containsAgentIdPhrase(just) && containsCompany(just)) return just;
-  // 2) Buscar en la transcripción líneas con “Agente: …”
   const lines = String(transcript||'').split(/\r?\n/);
   for (const ln of lines.reverse()) {
     const l = ln.trim();
@@ -525,7 +641,6 @@ function findFarewellEvidence(just='', transcript='') {
       return l.slice(0, 220);
     }
   }
-  // 3) Búsqueda laxa
   const t = String(transcript||'');
   if (containsAgentIdPhrase(t) && containsCompany(t)) {
     const idx = norm(t).indexOf('habl');
@@ -558,7 +673,7 @@ function hasBenefitAndConsequence(text='') {
   return hasB && hasC;
 }
 
-// --- NUEVO: evidencia de guion corporativo/empresarial (no valen listados de bancos) ---
+// --- evidencia de guion corporativo/empresarial (no valen listados de bancos) ---
 function hasCorporateChannelEvidence(text='') {
   const t = norm(text);
   if (
@@ -633,7 +748,6 @@ function calibratePosibleNegociacion(analisis={}, transcript='') {
     }
 
     // Ítem 8 — Guion completo (debe aclarar CUENTAS/CANALES CORPORATIVOS/EMPRESARIALES)
-    // Listar bancos/medios NO es suficiente.
     if (label.startsWith('8.') || (label.includes('guion') && label.includes('campana'))) {
       if (a.aplica !== false) {
         const source = (a.justificacion && a.justificacion !== 'no_evidencia') ? a.justificacion : transcript;
@@ -678,7 +792,6 @@ function calibrateRenuente(analisis={}, transcript='') {
     }
 
     // Ítem 7 — Ley 1581 (aceptar "15 81"; forzar NO CUMPLE si no hay ley)
-    // ¡OJO! No anclamos por número; buscamos '1581' o 'grabada' en el label o evidencia.
     if (label.includes('1581') || label.includes('grabada')) {
       if (a.aplica !== false) {
         const hasLaw = !!(findLey1581(a.justificacion) || findLey1581(transcript));
@@ -734,6 +847,92 @@ function calibrateRenuente(analisis={}, transcript='') {
   return analisis;
 }
 
+/** Consolidación: lee porAtributo existente y calcula nota/criticos.
+ * Respeta la regla de NO penalizar llamadas mal tipificadas.*/
+function ensureConsolidadoForType(analisis = {}, type) {
+  // ---- detectar mal tipificada según el tipo ----
+  let malTipificada = false;
+  let motivoMalTipificada = '';
+
+  if (type === 'novacion' && analisis?.novacion?.aceptada === false) {
+    malTipificada = true; motivoMalTipificada = 'No hay aceptación formal de novación';
+  } else if (type === 'propuesta_pago' && analisis?.propuesta_pago?.aceptada === false) {
+    malTipificada = true; motivoMalTipificada = 'Sin propuesta de pago aceptada';
+  } else if (type === 'abono' && analisis?.abono?.aceptado === false) {
+    malTipificada = true; motivoMalTipificada = 'No aplica abono sobre acuerdo vigente';
+  } else if (type === 'pago_cuotas' && analisis?.pago_cuotas?.aceptado === false) {
+    malTipificada = true; motivoMalTipificada = 'No hay aceptación de pago a cuotas';
+  } else if (type === 'posible_negociacion' && analisis?.posible_negociacion?.aplica === false) {
+    malTipificada = true; motivoMalTipificada = 'Sin posible negociación';
+  } else if (type === 'renuente' && analisis?.renuente?.aplica === false) {
+    malTipificada = true; motivoMalTipificada = 'Sin evidencia de renuencia';
+  }
+
+  // ---- si está mal tipificada: neutralizar ítems y fijar 100 ----
+  if (malTipificada) {
+    analisis.llamada_mal_tipificada = true;
+    analisis.motivo_mal_tipificada = motivoMalTipificada;
+
+    // 1) Tomamos los ítems que ya hayan venido del modelo;
+    //    si no hay, sembramos con el catálogo del tipo (para que el front los vea pero NO apliquen)
+    let actuales = Array.isArray(analisis?.consolidado?.porAtributo)
+      ? normalizePorAtributo(analisis.consolidado.porAtributo)
+      : [];
+    if (actuales.length === 0) {
+      actuales = getItemsForType(type).map(t => ({
+        atributo: t, aplica: false, cumplido: true, justificacion: 'no_aplica_por_tipificacion', mejora: ''
+      }));
+    }
+
+    const porAtributoNeutral = neutralizeItems(actuales, 'no_aplica_por_tipificacion');
+
+    analisis.consolidado = {
+      ...(analisis.consolidado || {}),
+      notaFinal: 100,
+      porAtributo: porAtributoNeutral,
+      afectadosCriticos: []
+    };
+
+    // Aliases/compat para front/Excel
+    analisis.afectadosCriticos = [];
+    analisis.porAtributo = porAtributoNeutral;
+    analisis.errores_criticos = [];
+    analisis.critical_errors = [];
+    // Mantén antifraude tal cual venga
+    analisis.alertas_antifraude = Array.isArray(analisis?.fraude?.alertas) ? analisis.fraude.alertas : [];
+    analisis.antifraud_alerts = analisis.alertas_antifraude;
+
+    return analisis; // << importante: salimos aquí, no seguimos con la rama "normal"
+  }
+
+  // ---- si NO está mal tipificada: flujo normal (nota binaria) ----
+  const rawPorAttr = normalizePorAtributo(analisis?.consolidado?.porAtributo || []);
+  const porAtributo = ensureBlock(rawPorAttr);
+  const nota = computeBinaryScore(porAtributo, true);
+  const afectadosCriticos = deriveAffectedCriticos(porAtributo);
+
+  analisis.consolidado = {
+    ...(analisis.consolidado || {}),
+    notaFinal: nota,
+    porAtributo,
+    afectadosCriticos
+  };
+
+  return analisis;
+}
+
+function neutralizeItems(list = [], reason = 'no_aplica_por_tipificacion') {
+  const base = Array.isArray(list) ? list : [];
+  return base.map(a => ({
+    atributo: String(a?.atributo || a?.categoria || '').trim() || '(ítem)',
+    aplica: false,
+    cumplido: true,
+    justificacion: (a?.justificacion && a.justificacion !== 'no_evidencia')
+      ? a.justificacion
+      : reason,
+    mejora: ''
+  }));
+}
 /* ==================== Analizador principal ==================== */
 export async function analyzeTranscriptSimple({
   transcript,
@@ -746,7 +945,7 @@ export async function analyzeTranscriptSimple({
   });
 
   const model      = process.env.OPENAI_CHAT_MODEL || 'gpt-4o-mini';
-  const MAX_TOKENS = Number(process.env.ANALYSIS_MAX_TOKENS) || 1100;
+  const MAX_TOKENS = Number(process.env.ANALYSIS_MAX_TOKENS) || 2200; // ↑ ampliado
 
   const tipKey = keyTipi(tipificacion);
   const campKey = keyTipi(campania);
@@ -759,12 +958,16 @@ export async function analyzeTranscriptSimple({
   const isPosibleNegociacionCP = isCP && (tipKey === 'posible negociacion' || tipKey === 'posible_negociacion');
   const isRenuentesCP          = isCP && (tipKey === 'renuentes' || tipKey === 'renuente' || tipKey === 'cliente renuente' || tipKey === 'cliente_renuente');
 
-  // ---- System prompt ----
+  // ---- System prompt (actualizado a 4 tipos de fraude y sin "riesgo") ----
   const system = `
 Eres un analista de calidad experto en Contact Center. Evalúas transcripciones y devuelves JSON ESTRICTO en español, **sin texto adicional**.
 No inventes datos. Si algo no aparece en la transcripción, indícalo como "no_evidencia".
 Canales OFICIALES de pago: ${OFFICIAL_PAY_CHANNELS.join(', ')}.
-Marca alertas de FRAUDE si el agente pide consignar/transferir a canal NO oficial o da un contacto NO oficial (otro número/WhatsApp personal). Incluye cita breve.
+Marca alertas de FRAUDE **usando solo estos tipos** (sin "riesgo") e incluyendo "cita" breve verificable:
+- "No dice número de cuenta"
+- "Dice número de cuenta parcialmente"
+- "Dice número de cuenta diferente"
+- "Indica al cliente que le va a marcar desde otro número"
 `.trim();
 
   // ---- Extra prompt específico por tipificación/campaña ----
@@ -779,8 +982,8 @@ Marca alertas de FRAUDE si el agente pide consignar/transferir a canal NO oficia
   // ---- Instrucciones de salida (JSON) ----
   const commonJsonShape = `
 {
-  "agent_name": "string (si no hay evidencia, \\"\\")",
-  "client_name": "string (si no hay evidencia, \\"\\")",
+  "agent_name": "string (si no hay evidencia, \"\")",
+  "client_name": "string (si no hay evidencia, \"\")",
   "resumen": "100-150 palabras, sin inventar nombres/fechas/montos",
   "hallazgos": ["3-6 bullets operativos y específicos sobre lo que sí aparece"],
   "sugerencias_generales": ["2-4 puntos accionables de mejora"],
@@ -794,7 +997,7 @@ Marca alertas de FRAUDE si el agente pide consignar/transferir a canal NO oficia
   },
   "fraude": {
     "alertas": [
-      { "tipo": "cuenta_no_oficial|contacto_numero_no_oficial|otro", "cita": "frase breve", "riesgo": "alto|medio|bajo" }
+      { "tipo": "No dice número de cuenta|Dice número de cuenta parcialmente|Dice número de cuenta diferente|Indica al cliente que le va a marcar desde otro número", "cita": "frase breve" }
     ],
     "observaciones": "string"
   }
@@ -803,8 +1006,8 @@ Marca alertas de FRAUDE si el agente pide consignar/transferir a canal NO oficia
 
   const novacionJsonShape = `
 {
-  "agent_name": "string (si no hay evidencia, \\"\\")",
-  "client_name": "string (si no hay evidencia, \\"\\")",
+  "agent_name": "string (si no hay evidencia, \"\")",
+  "client_name": "string (si no hay evidencia, \"\")",
   "resumen": "100-150 palabras (claridad de oferta, consentimiento, 1581/1266 si aplica, objeciones, tono)",
   "hallazgos": ["3-6 bullets operativos y específicos sobre lo que sí aparece"],
   "sugerencias_generales": ["2-4 puntos accionables de mejora"],
@@ -820,7 +1023,7 @@ Marca alertas de FRAUDE si el agente pide consignar/transferir a canal NO oficia
   },
   "fraude": {
     "alertas": [
-      { "tipo": "novacion_invalida|cuenta_no_oficial|contacto_numero_no_oficial|otro", "cita": "frase breve", "riesgo": "alto|medio|bajo" }
+      { "tipo": "No dice número de cuenta|Dice número de cuenta parcialmente|Dice número de cuenta diferente|Indica al cliente que le va a marcar desde otro número", "cita": "frase breve" }
     ],
     "observaciones": "string"
   }
@@ -829,8 +1032,8 @@ Marca alertas de FRAUDE si el agente pide consignar/transferir a canal NO oficia
 
   const propuestaJsonShape = `
 {
-  "agent_name": "string (si no hay evidencia, \\"\\")",
-  "client_name": "string (si no hay evidencia, \\"\\")",
+  "agent_name": "string (si no hay evidencia, \"\")",
+  "client_name": "string (si no hay evidencia, \"\")",
   "resumen": "100-150 palabras (protocolo, legalidad 1581/1266, cierre y tono)",
   "hallazgos": ["3-6 bullets operativos y específicos sobre lo que sí aparece"],
   "sugerencias_generales": ["2-4 puntos accionables de mejora"],
@@ -846,7 +1049,7 @@ Marca alertas de FRAUDE si el agente pide consignar/transferir a canal NO oficia
   },
   "fraude": {
     "alertas": [
-      { "tipo": "cuenta_no_oficial|contacto_numero_no_oficial|otro", "cita": "frase breve", "riesgo": "alto|medio|bajo" }
+      { "tipo": "No dice número de cuenta|Dice número de cuenta parcialmente|Dice número de cuenta diferente|Indica al cliente que le va a marcar desde otro número", "cita": "frase breve" }
     ],
     "observaciones": "string"
   }
@@ -855,8 +1058,8 @@ Marca alertas de FRAUDE si el agente pide consignar/transferir a canal NO oficia
 
   const abonoJsonShape = `
 {
-  "agent_name": "string (si no hay evidencia, \\"\\")",
-  "client_name": "string (si no hay evidencia, \\"\\")",
+  "agent_name": "string (si no hay evidencia, \"\")",
+  "client_name": "string (si no hay evidencia, \"\")",
   "resumen": "100-150 palabras (protocolo, legalidad 1581/1266, cierre y tono)",
   "hallazgos": ["3-6 bullets operativos y específicos sobre lo que sí aparece"],
   "sugerencias_generales": ["2-4 puntos accionables de mejora"],
@@ -872,7 +1075,7 @@ Marca alertas de FRAUDE si el agente pide consignar/transferir a canal NO oficia
   },
   "fraude": {
     "alertas": [
-      { "tipo": "cuenta_no_oficial|contacto_numero_no_oficial|otro", "cita": "frase breve", "riesgo": "alto|medio|bajo" }
+      { "tipo": "No dice número de cuenta|Dice número de cuenta parcialmente|Dice número de cuenta diferente|Indica al cliente que le va a marcar desde otro número", "cita": "frase breve" }
     ],
     "observaciones": "string"
   }
@@ -881,8 +1084,8 @@ Marca alertas de FRAUDE si el agente pide consignar/transferir a canal NO oficia
 
   const pagoCuotasJsonShape = `
 {
-  "agent_name": "string (si no hay evidencia, \\"\\")",
-  "client_name": "string (si no hay evidencia, \\"\\")",
+  "agent_name": "string (si no hay evidencia, \"\")",
+  "client_name": "string (si no hay evidencia, \"\")",
   "resumen": "100-150 palabras (condiciones del plan en cuotas, legalidad 1581/1266, objeciones, cierre y tono)",
   "hallazgos": ["3-6 bullets operativos y específicos sobre lo que sí aparece"],
   "sugerencias_generales": ["2-4 puntos accionables de mejora"],
@@ -898,7 +1101,7 @@ Marca alertas de FRAUDE si el agente pide consignar/transferir a canal NO oficia
   },
   "fraude": {
     "alertas": [
-      { "tipo": "cuenta_no_oficial|contacto_numero_no_oficial|otro", "cita": "frase breve", "riesgo": "alto|medio|bajo" }
+      { "tipo": "No dice número de cuenta|Dice número de cuenta parcialmente|Dice número de cuenta diferente|Indica al cliente que le va a marcar desde otro número", "cita": "frase breve" }
     ],
     "observaciones": "string"
   }
@@ -908,8 +1111,8 @@ Marca alertas de FRAUDE si el agente pide consignar/transferir a canal NO oficia
   // NUEVO — Shapes para Posible negociación y Renuentes
   const posibleNegJsonShape = `
 {
-  "agent_name": "string (si no hay evidencia, \\"\\")",
-  "client_name": "string (si no hay evidencia, \\"\\")",
+  "agent_name": "string (si no hay evidencia, \"\")",
+  "client_name": "string (si no hay evidencia, \"\")",
   "resumen": "100-150 palabras (señales de disposición, exploración de motivo, alternativas sin comprometer, trazabilidad y tono)",
   "hallazgos": ["3-6 bullets operativos y específicos sobre lo que sí aparece"],
   "sugerencias_generales": ["2-4 puntos accionables de mejora"],
@@ -925,7 +1128,7 @@ Marca alertas de FRAUDE si el agente pide consignar/transferir a canal NO oficia
   },
   "fraude": {
     "alertas": [
-      { "tipo": "cuenta_no_oficial|contacto_numero_no_oficial|otro", "cita": "frase breve", "riesgo": "alto|medio|bajo" }
+      { "tipo": "No dice número de cuenta|Dice número de cuenta parcialmente|Dice número de cuenta diferente|Indica al cliente que le va a marcar desde otro número", "cita": "frase breve" }
     ],
     "observaciones": "string"
   }
@@ -934,8 +1137,8 @@ Marca alertas de FRAUDE si el agente pide consignar/transferir a canal NO oficia
 
   const renuentesJsonShape = `
 {
-  "agent_name": "string (si no hay evidencia, \\"\\")",
-  "client_name": "string (si no hay evidencia, \\"\\")",
+  "agent_name": "string (si no hay evidencia, \"\")",
+  "client_name": "string (si no hay evidencia, \"\")",
   "resumen": "100-150 palabras (tipo de resistencia, control emocional, reformulación, valor/beneficios, trazabilidad y tono)",
   "hallazgos": ["3-6 bullets operativos y específicos sobre lo que sí aparece"],
   "sugerencias_generales": ["2-4 puntos accionables de mejora"],
@@ -951,7 +1154,7 @@ Marca alertas de FRAUDE si el agente pide consignar/transferir a canal NO oficia
   },
   "fraude": {
     "alertas": [
-      { "tipo": "cuenta_no_oficial|contacto_numero_no_oficial|otro", "cita": "frase breve", "riesgo": "alto|medio|bajo" }
+      { "tipo": "No dice número de cuenta|Dice número de cuenta parcialmente|Dice número de cuenta diferente|Indica al cliente que le va a marcar desde otro número", "cita": "frase breve" }
     ],
     "observaciones": "string"
   }
@@ -1005,33 +1208,76 @@ ${
       alertas: Array.isArray(json?.fraude?.alertas) ? json.fraude.alertas : [],
       observaciones: json?.fraude?.observaciones || ''
     },
-    // bloques opcionales (según tipificación)
     novacion: json?.novacion,
     propuesta_pago: json?.propuesta_pago,
     abono: json?.abono,
     pago_cuotas: json?.pago_cuotas,
-    posible_negociacion: json?.posible_negociacion,  // NUEVO
-    renuente: json?.renuente,                        // NUEVO
-    // compat histórico por si algo aguas arriba aún lee acuerdo_cuotas
+    posible_negociacion: json?.posible_negociacion,
+    renuente: json?.renuente,
     acuerdo_cuotas: json?.acuerdo_cuotas,
-    consolidado: json?.consolidado
+    consolidado: json?.consolidado || {}
   };
 
-  // ===== Calibración SOLO para "Posible negociación" / "Renuentes" (antes de nota y críticos) =====
-  if (isPosibleNegociacionCP && analisis?.consolidado?.porAtributo) {
+  // ==== Forzar que existan ítems cuando la tipificación aplica ====
+  const acceptedByType =
+    (isNovacionCP            ? analisis?.novacion?.aceptada !== false :
+    isPropuestaPagoCP        ? analisis?.propuesta_pago?.aceptada !== false :
+    isAbonoCP                ? analisis?.abono?.aceptado !== false :
+    isPagoCuotasCP           ? analisis?.pago_cuotas?.aceptado !== false :
+    isPosibleNegociacionCP   ? analisis?.posible_negociacion?.aplica !== false :
+    isRenuentesCP            ? analisis?.renuente?.aplica !== false :
+    true);
+
+  if (isCP) {
+    analisis = await ensureItemsBlock({
+      analisis,
+      client,
+      model,
+      transcript: String(transcript || ''),
+      tipKey,
+      accepted: acceptedByType
+    });
+  }
+
+  // ===== Calibración SOLO para "Posible negociación" / "Renuentes" (ya con porAtributo) =====
+  if (isPosibleNegociacionCP) {
     analisis = calibratePosibleNegociacion(analisis, String(transcript || ''));
   }
-  if (isRenuentesCP && analisis?.consolidado?.porAtributo) {
+  if (isRenuentesCP) {
     analisis = calibrateRenuente(analisis, String(transcript || ''));
   }
 
   // ---- Post-proceso por caso para nota 100/0 y afectados críticos
-  if (isNovacionCP)             analisis = ensureConsolidadoForType(analisis, 'novacion');
-  if (isPropuestaPagoCP)        analisis = ensureConsolidadoForType(analisis, 'propuesta_pago');
-  if (isAbonoCP)                analisis = ensureConsolidadoForType(analisis, 'abono');
-  if (isPagoCuotasCP)           analisis = ensureConsolidadoForType(analisis, 'pago_cuotas');
-  if (isPosibleNegociacionCP)   analisis = ensureConsolidadoForType(analisis, 'posible_negociacion');
-  if (isRenuentesCP)            analisis = ensureConsolidadoForType(analisis, 'renuente');
+  if (isNovacionCP)             analisis = ensureConsolidadoForType(analisis, 'novacion', acceptedByType);
+  if (isPropuestaPagoCP)        analisis = ensureConsolidadoForType(analisis, 'propuesta_pago', acceptedByType);
+  if (isAbonoCP)                analisis = ensureConsolidadoForType(analisis, 'abono', acceptedByType);
+  if (isPagoCuotasCP)           analisis = ensureConsolidadoForType(analisis, 'pago_cuotas', acceptedByType);
+  if (isPosibleNegociacionCP)   analisis = ensureConsolidadoForType(analisis, 'posible_negociacion', acceptedByType);
+  if (isRenuentesCP)            analisis = ensureConsolidadoForType(analisis, 'renuente', acceptedByType);
+
+  // === Etiqueta "mal tipificada" (para Excel)
+  {
+    let mal = false, motivo = '';
+
+    if (isNovacionCP && analisis?.novacion?.aceptada === false) {
+      mal = true; motivo = 'No hay aceptación formal de novación.';
+    } else if (isPropuestaPagoCP && analisis?.propuesta_pago?.aceptada === false) {
+      mal = true; motivo = 'Sin propuesta de pago aceptada.';
+    } else if (isAbonoCP && analisis?.abono?.aceptado === false) {
+      mal = true; motivo = 'No aplica abono sobre acuerdo vigente.';
+    } else if (isPagoCuotasCP && analisis?.pago_cuotas?.aceptado === false) {
+      mal = true; motivo = 'No hay aceptación de pago a cuotas.';
+    } else if (isPosibleNegociacionCP && analisis?.posible_negociacion?.aplica === false) {
+      mal = true; motivo = 'Sin posible negociación.';
+    } else if (isRenuentesCP && analisis?.renuente?.aplica === false) {
+      mal = true; motivo = 'Sin evidencia de renuencia.';
+    }
+
+    analisis.llamada_mal_tipificada = mal;
+    analisis.motivo_mal_tipificada = motivo;
+    analisis.etiquetas = Array.isArray(analisis.etiquetas) ? analisis.etiquetas : [];
+    if (mal && !analisis.etiquetas.includes('mal_tipificada')) analisis.etiquetas.push('mal_tipificada');
+  }
 
   // --- Compatibilidad para renderizadores MD antiguos (aliases planos)
   analisis.afectadosCriticos = Array.isArray(analisis?.consolidado?.afectadosCriticos)
@@ -1047,6 +1293,7 @@ ${
       ? analisis.consolidado.porAtributo
       : [];
 
+    analisis.errores_riticos /* legacy typo guard */;
     analisis.errores_criticos = porAttr
       .filter(a => a.aplica === true && a.cumplido === false)
       .map(a => ({
@@ -1065,7 +1312,7 @@ ${
     analisis.antifraud_alerts = analisis.alertas_antifraude;
   }
 
-  // Merge con heurística local anti-fraude (sin duplicar)
+  // Merge con heurística local anti-fraude (sin duplicar) — ahora SIN "riesgo"
   const heur = detectFraudHeuristics(String(transcript || ''));
   if (heur.length) {
     analisis.fraude.alertas = analisis.fraude.alertas || [];
