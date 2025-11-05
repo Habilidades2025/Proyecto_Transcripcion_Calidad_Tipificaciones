@@ -193,16 +193,12 @@ const POSIBLENEG_ITEMS = [
 ];
 
 const RENUENTES_ITEMS = [
-  '1. Informa beneficios y consecuencias de no pago',
-  '2. Indaga motivo del no pago',
-  '3. Solicita autorización para contacto por otros medios',
-  '4. Despedida según guion establecido',
-  '5. Ofrece alternativas acordes a la realidad del cliente y políticas vigentes',
-  '6. Debate objeciones según situación del cliente',
-  '7. Informa que la llamada es grabada y monitoreada (Ley 1581)',
-  '8. Usa guion completo establecido por la campaña',
-  '9. Evita argumentos engañosos con el cliente',
-  '10. Utiliza vocabulario prudente y respetuoso'
+  '1. Indaga motivo del no pago',
+  '2. Debate objeciones según situación del cliente',
+  '3. Informa que la llamada es grabada y monitoreada (Ley 1581)',
+  '4. Usa guion completo establecido por la campaña',
+  '5. Evita argumentos engañosos con el cliente',
+  '6. Utiliza vocabulario prudente y respetuoso'
 ];
 
 function getItemsForType(type) {
@@ -444,45 +440,71 @@ FRAUDE (solo tipos permitidos + "cita"):
 function buildRenuenteExtraPrompt() {
   return `
 EVALUACIÓN — CLIENTE RENUENTE (Carteras Propias)
-Definición: el titular evita comprometerse (resistencia activa/pasiva).
+Definición operativa: el titular evita comprometerse (resistencia activa o pasiva). Se considera renuente cuando hay negativa explícita, evasión sostenida, dilación recurrente o bloqueo de la gestión (p. ej., interrumpe, cambia de tema, no permite argumentar, o cuelga tras evadir).
 
-DECISIÓN PREVIA:
-• Si no hay renuencia: "renuente.aplica": false; todas "aplica": false; nota 100 (no penaliza por mal tipificación); FIN.
-• Si se evidencia que **el cliente cuelga** o la línea **se corta** antes de que el asesor pueda cumplir los ítems (corte temprano que impide gestión):
-  - "renuente.aplica": true  ← se mantiene la tipificación
-  - "renuente.fin_llamada": {
-      "tipo": "cliente_cuelga" | "corte_linea",
-      "tiempo": "mm:ss" (si aparece),
-      "evidencia": "cita literal breve (8+ palabras)"
-    }
-  - En "consolidado.porAtributo": marca **todos los ítems** con "aplica": false, "cumplido": true, "justificacion": "no_aplica_por_corte_cliente".
-  - "consolidado.notaFinal": 100.
-• **EXCEPCIÓN** (no aplicar lo anterior): si hay evidencia de que el **asesor** finaliza, acelera o induce el corte (p.ej., “voy a colgar”, “más tarde” y cuelga el asesor, cierre unilateral sin despedida ni alternativa). En ese caso **evalúa normalmente** los ítems según reglas y calcula la nota binaria.
-
-MARCADORES DE CORTE A DETECTAR (usa citas literales verificables):
-• “el cliente colgó”, “cuelga la llamada”, “se cortó la llamada”, “se cayó la llamada”, “se interrumpió la llamada”, “llamada finalizada por el cliente”.
-• Señales implícitas: última intervención del cliente seguida de desconexión inmediata, agente dice “se cortó”, “no me escucha, se cayó”.
-• Si no hay cita literal clara, usa **"no_evidencia"** y **no** apliques esta neutralización.
+DECISIÓN PREVIA (aplicabilidad del caso):
+• Si NO hay señales razonables de renuencia (p. ej., corte técnico inmediato sin interacción real), devuelve:
+  - "renuente.aplica": false
+  - "renuente.motivo_no_aplica": "No aplica — sin evidencia suficiente de renuencia."
+  - Marca todos los ítems con "aplica": false (no penaliza)
+  - "consolidado.notaFinal": 100
+  - FIN.
+• Si SÍ hay renuencia (aunque el cliente cuelgue luego), devuelve:
+  - "renuente.aplica": true
+  - Evalúa ítems con la regla de evidencia (abajo).
+  - Cuando el **corte/cuélgue** impida ejecutar un ítem, usa **"aplica": false** (no penaliza).
+  - Nunca marques "cumplido=false" por un ítem que el asesor **no pudo ejecutar** por corte del cliente.
 
 ${strictEvidenceBlock()}
 
-REGLAS POR ÍTEM:
-1) Beneficios+consecuencias: requiere ≥1 de cada tipo con **citas**. “Estafa/publicación” **no cuentan**.
-2) Indaga motivo: **pregunta abierta del agente**; respuestas del cliente **no sustituyen** la pregunta.
-3) Autorización otros medios: **pregunta de autorización** + **aceptación**.
-4) Despedida (guion): se acepta como **cumple** si hay **identificación del agente + empresa** (p.ej., “Recuerde que le habló … de Novartec/Contacto Solutions”), aunque no haya agradecimiento/deseo.
-6) Objeciones: si **no hubo**, marca **aplica=false** y **cumplido=true**.
-7) Ley 1581: aceptar también **“15 81”** con espacios.
-8) Guion (canales oficiales): aclarar que **solo** se recauda a **cuentas/canales corporativos** (variantes válidas).
+DETECCIÓN DE CORTE/INTERRUPCIÓN DEL CLIENTE (aplica=false por bloqueo):
+Considera como **corte del cliente** cuando se observe cualquiera de los siguientes patrones en la transcripción:
+• Últimas intervenciones del asesor con llamadas de contacto tipo: “¿Aló?”, “¿Me escucha?”, “¿Señor/Señora?”, “Disculpe?”, “¿sigue en línea?”, sin respuesta del cliente y final abrupto.
+• Frases de cierre abruptas del cliente (“no me interesa”, “no vuelvan a llamar”, “chao”) seguidas de fin inmediato.
+• Silencio prolongado/ausencia de turnos del cliente, o descripción del sistema/ASR de desconexión.
+Ante esto, **marca "aplica": false** solo en los ítems imposibilitados por el corte. Si TODOS quedan en "aplica": false, la **nota es 100**.
 
-ÍTEMS CRÍTICOS:
+ÍTEMS A AUDITAR (únicos y críticos en este caso):
 ${RENUENTES_ITEMS.map(s => `- ${s}`).join('\n')}
 
-CÁLCULO:
-• Algún aplicable false → 0; todos true → 100; nada aplica → 100.
-• En corte por **cliente**/**línea** que impide gestión: todos "aplica": false → **100**.
+REGLAS POR ÍTEM (citas literales obligatorias):
+1) Indaga motivo del no pago
+   • Evidencia válida: **pregunta abierta del asesor** (p. ej., “¿Cuál es el motivo…?”, “¿Por qué no ha podido…?”, “¿Qué le impidió…?”).
+   • No basta la **respuesta del cliente**; si solo hay respuesta sin pregunta → "cumplido": false.
+   • Si el cliente **corta** antes de que el asesor pueda indagar → "aplica": false.
 
-FRAUDE (solo tipos permitidos + "cita"):
+2) Debate objeciones según situación del cliente
+   • Si existen objeciones (explícitas o implícitas), la evidencia debe mostrar **reformulación/validación + alternativa/beneficio**.
+   • Si **no hubo objeciones**, marca **"aplica": false** (no penaliza).
+   • Si hubo objeciones pero el **corte** impidió debatir → "aplica": false.
+
+3) Informa que la llamada es grabada y monitoreada (Ley 1581)
+   • La cita debe contener **“1581”** (acepta “15 81”) o mención explícita a **ley + protección/tratamiento de datos**.
+   • “La llamada es grabada” **sin ley** → **no_evidencia** (cumplido=false).
+   • Si el **corte** ocurre antes de informar → "aplica": false.
+
+4) Usa guion completo establecido por la campaña
+   • Evidencia esperada (al menos 1 trazo claro del guion): **presentación + empresa**, **canales/cuentas corporativas** (no números personales), **trazabilidad/recordatorio institucional**.
+   • Listar bancos o medios **sin** aclarar que son **corporativos/empresariales** **no** cumple.
+   • Si el **corte** impide usar el guion → "aplica": false.
+
+5) Evita argumentos engañosos con el cliente
+   • Marca **false** si hay promesas no autorizadas, amenazas improcedentes, o información confusa (p. ej., “si no paga hoy lo embargan mañana” sin sustento).
+   • Si no hay evidencia de engaño, **cumplido=true** por defecto (no inventes incumplimientos).
+   • Si el corte impide evaluar y **no** hay evidencia de engaño → "aplica": false.
+
+6) Utiliza vocabulario prudente y respetuoso
+   • Marca **false** por insultos, descalificaciones, tono burlesco, o trato desconsiderado.
+   • Si no hay evidencia de irrespeto → **cumplido=true** por defecto.
+   • Si el corte impide evaluar y no hay evidencia en contra → "aplica": false.
+
+CÁLCULO DE NOTA (binario):
+• Considera solo los ítems con **"aplica": true**.
+• Si **alguno** aplicable está "cumplido=false" → **notaFinal = 0**.
+• Si **todos** los aplicables están "cumplido=true" → **notaFinal = 100**.
+• Si **ningún** ítem aplica (todos "aplica": false, p. ej., por corte temprano) → **notaFinal = 100**.
+
+FRAUDE (reporta **solo** estos tipos + "cita" breve verificable):
 • "No dice número de cuenta"
 • "Dice número de cuenta parcialmente"
 • "Dice número de cuenta diferente"
