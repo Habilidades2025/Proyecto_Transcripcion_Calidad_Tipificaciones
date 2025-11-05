@@ -43,6 +43,25 @@ function sanitizeMaybeBlank(v) {
   return v;
 }
 
+// === TZ consistente con persistService
+const FILES_TZ = process.env.FILES_TZ || process.env.TZ || 'America/Bogota';
+function toTzDate(dateLike) {
+  const base = dateLike ? new Date(dateLike) : new Date();
+  return new Date(base.toLocaleString('en-US', { timeZone: FILES_TZ }));
+}
+function getYMD(ts) {
+  const d = toTzDate(ts);
+  return { yyyy: d.getFullYear(), mm: `${d.getMonth()+1}`.padStart(2,'0'), dd: `${d.getDate()}`.padStart(2,'0') };
+}
+function matchesYMD(ts, y, m, d) {
+  if (!y && !m && !d) return true;
+  const { yyyy, mm, dd } = getYMD(ts);
+  if (y && String(yyyy) !== String(y)) return false;
+  if (m && String(mm).padStart(2,'0') !== String(m).padStart(2,'0')) return false;
+  if (d && String(dd).padStart(2,'0') !== String(d).padStart(2,'0')) return false;
+  return true;
+}
+
 // consolidado seguro: raíz -> analisis.consolidado -> {}
 function getConsolidado(audit) {
   const an = audit?.analisis || {};
@@ -95,9 +114,7 @@ function parseCallNameFields(name='') {
   return { doc, date, time, client, tmo };
 }
 
-/* ===== Formateo de fraude =====
-   buildFraudString(): para MD (con riesgo y cita)
-   NUEVO listFraudPlainTypes(): para Excel (solo el tipo; sin emoji, sin riesgo, sin cita) */
+/* ===== Formateo de fraude ===== */
 function buildFraudString(analisis) {
   if (!analisis || !Array.isArray(analisis?.fraude?.alertas)) return '';
   return analisis.fraude.alertas
@@ -143,7 +160,7 @@ function buildCallMarkdown(audit) {
   const cons = getConsolidado(audit);
   const transcriptMarked = String(audit?.transcriptMarked || '').trim();
 
-  const fecha        = meta.timestamp ? new Date(meta.timestamp).toLocaleString() : '';
+  const fecha        = meta.timestamp ? toTzDate(meta.timestamp).toLocaleString() : '';
   const agente       = meta.agentName    || an.agent_name  || '-';
   const cliente      = meta.customerName || an.client_name || '-';
   const campania     = meta.campania     || '';
@@ -204,17 +221,46 @@ function buildCallMarkdown(audit) {
   return lines.join('\n');
 }
 
-// === Audits (con paginación opcional) ===
-router.get('/audits', (req, res) => {
+/* ========================== Filtros por Año/Mes/Día ==========================
+   Soportados en:
+   - GET /audits
+   - GET /audits/export.json
+   - GET /audits/export.xlsx
+
+   Query params:
+   - year=2025
+   - month=10
+   - day=03
+   (Opcional) tz=America/Bogota -> si quieres sobreescribir temporalmente FILES_TZ
+-------------------------------------------------------------------------------*/
+
+function readWithFilters(req) {
+  const y = req.query.year ? String(req.query.year).trim() : '';
+  const m = req.query.month ? String(req.query.month).padStart(2,'0') : '';
+  const d = req.query.day ? String(req.query.day).padStart(2,'0') : '';
+  const hasYMD = Boolean(y || m || d);
+
+  // Si hay filtros de fecha, leemos TODO y luego filtramos (para exactitud)
+  // Si NO hay filtros, respetamos paginación (eficiente).
+  if (hasYMD) {
+    const all = listAudits();
+    return all.filter(it => matchesYMD(it?.metadata?.timestamp, y, m, d));
+  }
+
   const hasPaging = (req.query.offset !== undefined) || (req.query.limit !== undefined);
   if (hasPaging && typeof listAuditsPage === 'function') {
     const offset = toInt(req.query.offset, 0);
     const limit  = toInt(req.query.limit,  200);
     const order  = (req.query.order === 'asc') ? 'asc' : 'desc';
-    const { total, items } = listAuditsPage({ offset, limit, order });
-    return res.json({ total, items });
+    const { items } = listAuditsPage({ offset, limit, order });
+    return items;
   }
-  const items = listAudits();
+  return listAudits();
+}
+
+// === Audits (con paginación opcional y/o filtros Y/M/D) ===
+router.get('/audits', (req, res) => {
+  const items = readWithFilters(req);
   res.json({ total: items.length, items });
 });
 
@@ -223,38 +269,22 @@ router.get('/audits/summary', (_req, res) => {
   res.json(s);
 });
 
-// === Export JSON (con paginación opcional) ===
+// === Export JSON (con paginación opcional y/o filtros Y/M/D) ===
 router.get('/audits/export.json', (req, res) => {
-  const hasPaging = (req.query.offset !== undefined) || (req.query.limit !== undefined);
-  let items = [];
-  if (hasPaging && typeof listAuditsPage === 'function') {
-    const offset = toInt(req.query.offset, 0);
-    const limit  = toInt(req.query.limit,  1000);
-    items = listAuditsPage({ offset, limit, order: 'desc' }).items;
-  } else {
-    items = listAudits();
-  }
-
+  const items = readWithFilters(req);
   res.setHeader('Content-Type', 'application/json');
   res.setHeader('Content-Disposition', 'attachment; filename="audits.json"');
   res.send(JSON.stringify(items, null, 2));
 });
 
-// === Export a Excel (con paginación opcional) ===
+// === Export a Excel (con paginación opcional y/o filtros Y/M/D) ===
 // Requisitos extra:
 // - Parsear "Nombre de la llamada" para llenar Documento (misma columna), Número cliente, TMO y Fecha (DD/MM/AAAA).
 // - Una fila por cada crítico/alerta (pareo por índice).
 // - Escribir celdas REALMENTE vacías (undefined) para no romper fórmulas/filtros.
+// - NUEVO: columnas Año / Mes / Día según FILES_TZ, alineadas con almacenamiento.
 router.get('/audits/export.xlsx', (req, res) => {
-  const hasPaging = (req.query.offset !== undefined) || (req.query.limit !== undefined);
-  let items = [];
-  if (hasPaging && typeof listAuditsPage === 'function') {
-    const offset = toInt(req.query.offset, 0);
-    const limit  = toInt(req.query.limit,  5000);
-    items = listAuditsPage({ offset, limit, order: 'desc' }).items;
-  } else {
-    items = listAudits();
-  }
+  const items = readWithFilters(req);
 
   const rows = [];
   items.forEach((it, idx) => {
@@ -271,11 +301,11 @@ router.get('/audits/export.xlsx', (req, res) => {
     const parsed      = parseCallNameFields(callName);
     const nombreDoc   = parsed.doc || callName; // si no parsea, dejamos el callId completo
 
-    // Fecha preferida: del nombre. Fallback al timestamp.
+    // Fecha preferida: del nombre. Fallback al timestamp con TZ.
     let fechaFmt = ddmmyyyyFromISO(parsed.date);
     if (!fechaFmt && it?.metadata?.timestamp) {
       try {
-        const d = new Date(it.metadata.timestamp);
+        const d = toTzDate(it.metadata.timestamp);
         const dd = `${d.getDate()}`.padStart(2,'0');
         const mm = `${d.getMonth()+1}`.padStart(2,'0');
         const yy = d.getFullYear();
@@ -315,7 +345,7 @@ router.get('/audits/export.xlsx', (req, res) => {
     }
   });
 
-  // Limpieza adicional de invisibles: elimina claves que sean solo espacios/invisibles
+  // Limpieza adicional de invisibles
   for (const r of rows) {
     for (const k of Object.keys(r)) {
       const v = r[k];
@@ -329,7 +359,7 @@ router.get('/audits/export.xlsx', (req, res) => {
     'Nombre de la llamada', // documento asesor
     'Número cliente',
     'TMO',
-    'Fecha',                // DD/MM/AAAA (del nombre)
+    'Fecha',                // DD/MM/AAAA (del nombre o timestamp)
     'Agente',
     'Cliente',
     'Campaña',

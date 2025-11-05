@@ -13,6 +13,10 @@ const BATCH_META_DIR      = path.join(ROOT, 'batches');               // guarda 
 const REPORTS_DIR         = path.resolve('reports');                  // reportes individuales
 const REPORTS_BATCH_DIR   = path.join(REPORTS_DIR, 'batches');        // reportes por bloque
 
+// NUEVO: control de TZ y partición por día
+const FILES_TZ = process.env.FILES_TZ || process.env.TZ || 'America/Bogota';
+const AUDITS_BY_DAY = (process.env.AUDITS_BY_DAY || '1') === '1'; // por defecto activado
+
 ensureDir(ROOT);
 ensureDir(AUDITS_DIR);
 ensureDir(TRANS_DIR);        // asegurar carpeta de transcripciones
@@ -32,21 +36,35 @@ function toNum(x) { const n = Number(x); return Number.isFinite(n) ? n : 0; }
 function pad2(n) { return String(n).padStart(2, '0'); }
 function safeName(s='') { return String(s || '').trim().replace(/[^a-z0-9._-]+/gi, '_'); }
 
+// NUEVO: helpers de fecha con zona horaria
+function toTzDate(dateLike) {
+  const base = dateLike ? new Date(dateLike) : new Date();
+  // Normaliza a la TZ definida sin librerías externas
+  return new Date(base.toLocaleString('en-US', { timeZone: FILES_TZ }));
+}
+function getYMD(timestamp) {
+  const d = toTzDate(timestamp);
+  return {
+    yyyy: d.getFullYear(),
+    mm: pad2(d.getMonth() + 1),
+    dd: pad2(d.getDate()),
+  };
+}
+
 // ---------- Guardar auditoría (sharding + transcript .txt garantizado) ----------
 export function saveAudit(audit = {}) {
   // Log de configuración efectiva
   console.log(
-    '[persist] INLINE=%s FORCE=%s BY_DAY=%s',
+    '[persist] INLINE=%s FORCE=%s TRANS_BY_DAY=%s AUDITS_BY_DAY=%s TZ=%s',
     process.env.STORE_TRANSCRIPT_INLINE,
     process.env.STORE_TRANSCRIPT_FORCE_FILE,
-    process.env.STORE_TRANSCRIPT_BY_DAY
+    process.env.STORE_TRANSCRIPT_BY_DAY,
+    AUDITS_BY_DAY ? '1' : '0',
+    FILES_TZ
   );
 
   const ts = audit?.metadata?.timestamp ?? Date.now();
-  const d  = new Date(ts);
-  const yyyy = d.getFullYear();
-  const mm   = pad2(d.getMonth() + 1);
-  const dd   = pad2(d.getDate());
+  const { yyyy, mm, dd } = getYMD(ts);
 
   // ID base: callId > originalFile (sin extensión) > timestamp
   const origFile = String(audit?.metadata?.originalFile || '').trim();
@@ -57,8 +75,9 @@ export function saveAudit(audit = {}) {
     String(ts);
   const callId = safeName(callIdRaw);
 
-  const shardDir = path.join(AUDITS_DIR, String(yyyy), String(mm));
-  ensureDir(shardDir);
+  // NUEVO: ahora los JSON de auditoría van en /audits/AAAA/MM/DD (si AUDITS_BY_DAY=1)
+  const auditDir = path.join(AUDITS_DIR, String(yyyy), String(mm), ...(AUDITS_BY_DAY ? [String(dd)] : []));
+  ensureDir(auditDir);
 
   // Backfill nombres desde análisis si faltan en metadata
   const agentFromAnalysis  = audit?.analisis?.agent_name  || '';
@@ -80,10 +99,10 @@ export function saveAudit(audit = {}) {
   let externalTrans = (process.env.STORE_TRANSCRIPT_INLINE || '1') !== '1';
   if (FORCE_FILE) externalTrans = true;
 
-  const BY_DAY = (process.env.STORE_TRANSCRIPT_BY_DAY || '0') === '1';
+  const TRANS_BY_DAY = (process.env.STORE_TRANSCRIPT_BY_DAY || '0') === '1';
 
-  // Directorio para transcripciones
-  const tDir = path.join(TRANS_DIR, String(yyyy), String(mm), ...(BY_DAY ? [String(dd)] : []));
+  // Directorio para transcripciones (se respeta bandera existente)
+  const tDir = path.join(TRANS_DIR, String(yyyy), String(mm), ...(TRANS_BY_DAY ? [String(dd)] : []));
   ensureDir(tDir);
 
   // Escribir .txt si corresponde y hay algo que escribir
@@ -103,7 +122,7 @@ export function saveAudit(audit = {}) {
   // Decidir si mantener transcript inline en JSON
   const inlineTranscript = externalTrans ? undefined : pickInline;
 
-  const filePath = path.join(shardDir, `${callId}.json`);
+  const filePath = path.join(auditDir, `${callId}.json`);
   const payload = {
     ...audit,
     // Campos de transcript
@@ -257,6 +276,7 @@ export function resolveReportFile(nameOrPath) {
   if (fs.existsSync(p1)) return p1;
   // 2) reportes de lotes
   const p2 = path.join(REPORTS_BATCH_DIR, base);
+  if (fs.existsExists && fs.existsSync(p2)) return p2; // guard
   if (fs.existsSync(p2)) return p2;
   // 3) permitir path relativo (producido desde meta)
   const maybe = path.isAbsolute(nameOrPath)

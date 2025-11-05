@@ -448,18 +448,39 @@ Definición: el titular evita comprometerse (resistencia activa/pasiva).
 
 DECISIÓN PREVIA:
 • Si no hay renuencia: "renuente.aplica": false; todas "aplica": false; nota 100 (no penaliza por mal tipificación); FIN.
+• Si se evidencia que **el cliente cuelga** o la línea **se corta** antes de que el asesor pueda cumplir los ítems (corte temprano que impide gestión):
+  - "renuente.aplica": true  ← se mantiene la tipificación
+  - "renuente.fin_llamada": {
+      "tipo": "cliente_cuelga" | "corte_linea",
+      "tiempo": "mm:ss" (si aparece),
+      "evidencia": "cita literal breve (8+ palabras)"
+    }
+  - En "consolidado.porAtributo": marca **todos los ítems** con "aplica": false, "cumplido": true, "justificacion": "no_aplica_por_corte_cliente".
+  - "consolidado.notaFinal": 100.
+• **EXCEPCIÓN** (no aplicar lo anterior): si hay evidencia de que el **asesor** finaliza, acelera o induce el corte (p.ej., “voy a colgar”, “más tarde” y cuelga el asesor, cierre unilateral sin despedida ni alternativa). En ese caso **evalúa normalmente** los ítems según reglas y calcula la nota binaria.
+
+MARCADORES DE CORTE A DETECTAR (usa citas literales verificables):
+• “el cliente colgó”, “cuelga la llamada”, “se cortó la llamada”, “se cayó la llamada”, “se interrumpió la llamada”, “llamada finalizada por el cliente”.
+• Señales implícitas: última intervención del cliente seguida de desconexión inmediata, agente dice “se cortó”, “no me escucha, se cayó”.
+• Si no hay cita literal clara, usa **"no_evidencia"** y **no** apliques esta neutralización.
 
 ${strictEvidenceBlock()}
 
-APLICABILIDAD Y REGLAS:
-• Ítem 5 (alternativas) y 6 (objeciones): si no se presentan, **aplica=false**.
-• Resto igual que en Pago a cuotas.
+REGLAS POR ÍTEM:
+1) Beneficios+consecuencias: requiere ≥1 de cada tipo con **citas**. “Estafa/publicación” **no cuentan**.
+2) Indaga motivo: **pregunta abierta del agente**; respuestas del cliente **no sustituyen** la pregunta.
+3) Autorización otros medios: **pregunta de autorización** + **aceptación**.
+4) Despedida (guion): se acepta como **cumple** si hay **identificación del agente + empresa** (p.ej., “Recuerde que le habló … de Novartec/Contacto Solutions”), aunque no haya agradecimiento/deseo.
+6) Objeciones: si **no hubo**, marca **aplica=false** y **cumplido=true**.
+7) Ley 1581: aceptar también **“15 81”** con espacios.
+8) Guion (canales oficiales): aclarar que **solo** se recauda a **cuentas/canales corporativos** (variantes válidas).
 
 ÍTEMS CRÍTICOS:
 ${RENUENTES_ITEMS.map(s => `- ${s}`).join('\n')}
 
 CÁLCULO:
 • Algún aplicable false → 0; todos true → 100; nada aplica → 100.
+• En corte por **cliente**/**línea** que impide gestión: todos "aplica": false → **100**.
 
 FRAUDE (solo tipos permitidos + "cita"):
 • "No dice número de cuenta"
