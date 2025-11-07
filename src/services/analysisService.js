@@ -440,7 +440,7 @@ FRAUDE (solo tipos permitidos + "cita"):
 function buildRenuenteExtraPrompt() {
   return `
 EVALUACIÓN — CLIENTE RENUENTE (Carteras Propias)
-Definición operativa: el titular evita comprometerse (resistencia activa o pasiva). Se considera renuente cuando hay negativa explícita, evasión sostenida, dilación recurrente o bloqueo de la gestión (p. ej., interrumpe, cambia de tema, no permite argumentar, o cuelga tras evadir).
+Definición operativa: el titular evita comprometerse (resistencia activa o pasiva). Se considera renuente cuando hay negativa explícita, evasión sostenida, dilación recurrente o bloqueo de la gestión (p. ej., interrumpe, cambia de tema, no permite argumentar).
 
 DECISIÓN PREVIA (aplicabilidad del caso):
 • Si NO hay señales razonables de renuencia (p. ej., corte técnico inmediato sin interacción real), devuelve:
@@ -452,17 +452,21 @@ DECISIÓN PREVIA (aplicabilidad del caso):
 • Si SÍ hay renuencia (aunque el cliente cuelgue luego), devuelve:
   - "renuente.aplica": true
   - Evalúa ítems con la regla de evidencia (abajo).
-  - Cuando el **corte/cuélgue** impida ejecutar un ítem, usa **"aplica": false** (no penaliza).
+  - Cuando el **corte/cuélgue del cliente** impida ejecutar un ítem, usa **"aplica": false** y en "justificacion" escribe **"no_aplica_por_corte_cliente"** (no penaliza).
   - Nunca marques "cumplido=false" por un ítem que el asesor **no pudo ejecutar** por corte del cliente.
 
 ${strictEvidenceBlock()}
 
-DETECCIÓN DE CORTE/INTERRUPCIÓN DEL CLIENTE (aplica=false por bloqueo):
-Considera como **corte del cliente** cuando se observe cualquiera de los siguientes patrones en la transcripción:
-• Últimas intervenciones del asesor con llamadas de contacto tipo: “¿Aló?”, “¿Me escucha?”, “¿Señor/Señora?”, “Disculpe?”, “¿sigue en línea?”, sin respuesta del cliente y final abrupto.
-• Frases de cierre abruptas del cliente (“no me interesa”, “no vuelvan a llamar”, “chao”) seguidas de fin inmediato.
-• Silencio prolongado/ausencia de turnos del cliente, o descripción del sistema/ASR de desconexión.
-Ante esto, **marca "aplica": false** solo en los ítems imposibilitados por el corte. Si TODOS quedan en "aplica": false, la **nota es 100**.
+DETECCIÓN DE CORTE/INTERRUPCIÓN DEL CLIENTE (neutralizar ítems imposibilitados):
+Considera como **corte del cliente** cuando se observe alguno de estos patrones, especialmente en los **últimos turnos**:
+• Cliente dice: “un momento”, “permítame”, “espéreme”, “deme un segundo/segundito”, “ya le confirmo”, y **no vuelve** a intervenir antes del fin.
+• El agente intenta reconectar: “¿Aló?”, “¿Me escucha?”, “¿Señor/Señora?”, “Disculpe?”, “¿sigue en línea?” y **no hay respuesta** del cliente, final abrupto.
+• Frases del cliente de cierre tajante seguidas de fin inmediato: “no me interesa”, “no vuelvan a llamar”, “esa deuda no es mía”, “número equivocado”.
+• Silencio prolongado/ausencia de turnos del cliente o anotación del sistema/ASR de desconexión.
+Ante esto:
+  - Marca **"aplica": false** únicamente en los ítems que **no pudieron ejecutarse** por el corte y usa "justificacion":"no_aplica_por_corte_cliente".
+  - Si **TODOS** los ítems quedan en "aplica": false (corte muy temprano) → **notaFinal = 100**.
+  - Además, incluye ` + '`flags.corte_cliente=true`' + ` y añade la etiqueta "corte_cliente" (si tu salida maneja "etiquetas").
 
 ÍTEMS A AUDITAR (únicos y críticos en este caso):
 ${RENUENTES_ITEMS.map(s => `- ${s}`).join('\n')}
@@ -470,33 +474,33 @@ ${RENUENTES_ITEMS.map(s => `- ${s}`).join('\n')}
 REGLAS POR ÍTEM (citas literales obligatorias):
 1) Indaga motivo del no pago
    • Evidencia válida: **pregunta abierta del asesor** (p. ej., “¿Cuál es el motivo…?”, “¿Por qué no ha podido…?”, “¿Qué le impidió…?”).
-   • No basta la **respuesta del cliente**; si solo hay respuesta sin pregunta → "cumplido": false.
-   • Si el cliente **corta** antes de que el asesor pueda indagar → "aplica": false.
+   • Solo la **respuesta del cliente** sin pregunta → "cumplido": false.
+   • Si el cliente **corta antes** de que el asesor pueda indagar → "aplica": false; "justificacion":"no_aplica_por_corte_cliente".
 
 2) Debate objeciones según situación del cliente
-   • Si existen objeciones (explícitas o implícitas), la evidencia debe mostrar **reformulación/validación + alternativa/beneficio**.
-   • Si **no hubo objeciones**, marca **"aplica": false** (no penaliza).
-   • Si hubo objeciones pero el **corte** impidió debatir → "aplica": false.
+   • Si hay objeciones (explícitas o implícitas), la evidencia debe mostrar **reformulación/validación + alternativa/beneficio**.
+   • Si **no hubo objeciones** → **"aplica": false** (no penaliza).
+   • Si hubo objeciones pero el **corte** impidió debatir → "aplica": false; "justificacion":"no_aplica_por_corte_cliente".
 
 3) Informa que la llamada es grabada y monitoreada (Ley 1581)
    • La cita debe contener **“1581”** (acepta “15 81”) o mención explícita a **ley + protección/tratamiento de datos**.
    • “La llamada es grabada” **sin ley** → **no_evidencia** (cumplido=false).
-   • Si el **corte** ocurre antes de informar → "aplica": false.
+   • Si el **corte** ocurre antes de informar → "aplica": false; "justificacion":"no_aplica_por_corte_cliente".
 
 4) Usa guion completo establecido por la campaña
-   • Evidencia esperada (al menos 1 trazo claro del guion): **presentación + empresa**, **canales/cuentas corporativas** (no números personales), **trazabilidad/recordatorio institucional**.
-   • Listar bancos o medios **sin** aclarar que son **corporativos/empresariales** **no** cumple.
-   • Si el **corte** impide usar el guion → "aplica": false.
+   • Evidencia esperada (≥1 trazo claro del guion): **presentación + empresa**, **canales/cuentas corporativas** (no números personales), **trazabilidad/recordatorio institucional**.
+   • Listar bancos/medios **sin** aclarar que son **corporativos/empresariales** **no** cumple.
+   • Si el **corte** impide usar el guion → "aplica": false; "justificacion":"no_aplica_por_corte_cliente".
 
 5) Evita argumentos engañosos con el cliente
    • Marca **false** si hay promesas no autorizadas, amenazas improcedentes, o información confusa (p. ej., “si no paga hoy lo embargan mañana” sin sustento).
-   • Si no hay evidencia de engaño, **cumplido=true** por defecto (no inventes incumplimientos).
-   • Si el corte impide evaluar y **no** hay evidencia de engaño → "aplica": false.
+   • Si no hay evidencia de engaño → **cumplido=true** por defecto (no inventes incumplimientos).
+   • Si el corte impide evaluar y **no** hay evidencia de engaño → "aplica": false; "justificacion":"no_aplica_por_corte_cliente".
 
 6) Utiliza vocabulario prudente y respetuoso
-   • Marca **false** por insultos, descalificaciones, tono burlesco, o trato desconsiderado.
+   • Marca **false** por insultos, descalificaciones, tono burlesco o trato desconsiderado.
    • Si no hay evidencia de irrespeto → **cumplido=true** por defecto.
-   • Si el corte impide evaluar y no hay evidencia en contra → "aplica": false.
+   • Si el corte impide evaluar y no hay evidencia en contra → "aplica": false; "justificacion":"no_aplica_por_corte_cliente".
 
 CÁLCULO DE NOTA (binario):
 • Considera solo los ítems con **"aplica": true**.
@@ -736,6 +740,65 @@ function findCorporateEvidenceLine(transcript='') {
   }
   return null;
 }
+/** Divide la transcripción marcada en turnos {t,speaker,text} */
+function splitTurns(marked='') {
+  const lines = String(marked||'').split(/\r?\n/);
+  const out = [];
+  for (const ln of lines) {
+    const m = /^(?:\s*(\d{2}:\d{2})\s+)?\s*(Agente|Asesor|Asesora|Cliente)\s*:\s*(.*)$/.exec(ln);
+    if (m) {
+      out.push({ t: m[1] || '', speaker: m[2].toLowerCase(), text: m[3].trim() });
+    } else if (ln.trim()) {
+      out.push({ t: '', speaker: 'otro', text: ln.trim() });
+    }
+  }
+  return out;
+}
+
+/** Heurística de corte por parte del cliente (hold sin retorno, monólogo final del agente, frase truncada) */
+function detectClientCut(markedOrPlain='') {
+  const txt = String(markedOrPlain||'');
+  const turns = splitTurns(txt);
+  const last5 = turns.slice(-5);
+  const lastClientIdx = [...turns].reverse().findIndex(u => u.speaker.includes('cliente'));
+  const lastAgentIdx  = [...turns].reverse().findIndex(u => u.speaker.includes('agente') || u.speaker.includes('asesor'));
+  const last = turns[turns.length - 1] || { t:'', speaker:'', text:'' };
+
+  const HOLD_RE = /\b(un\s*momento|perm[ií]tame|esp[eé]reme|deme\s+(?:un\s+)?segund(?:o|ito)|ya\s+le\s+confirmo|ya\s+le\s+digo|ya\s+reviso|ya\s+miro)\b/i;
+  const RECONTACT_RE = /\b(al[oó]|me\s+escucha|sigue\s+en\s+l[ií]nea|disculpe|¿al[oó]\??)\b/i;
+
+  // 1) Cliente dice "un momento/permítame..." y no vuelve a hablar
+  const clientHoldIdx = turns.findIndex(u => u.speaker.includes('cliente') && HOLD_RE.test(u.text));
+  const hasHoldNoReturn = clientHoldIdx !== -1 && turns.slice(clientHoldIdx + 1).every(u => !u.speaker.includes('cliente'));
+
+  // 2) Monólogo de reconexión del agente al final sin respuesta del cliente
+  const last3 = turns.slice(-3);
+  const agentRecontactAtEnd = last3.some(u => (u.speaker.includes('agente') || u.speaker.includes('asesor')) && RECONTACT_RE.test(u.text))
+                             && !last3.some(u => u.speaker.includes('cliente'));
+
+  // 3) Frase final truncada (muy corta o termina en conectores)
+  const TRUNC_END_RE = /(,\s*|-\s*|\bde$|\bque$|\bpara$|\.\.\.$)/i;
+  const truncatedTail = last.text.length > 0 && (last.text.length < 12 || TRUNC_END_RE.test(last.text));
+
+  const cut = hasHoldNoReturn || agentRecontactAtEnd || truncatedTail;
+  let reason = '';
+  if (hasHoldNoReturn) reason = 'hold_sin_retorno';
+  else if (agentRecontactAtEnd) reason = 'monologo_agente_final';
+  else if (truncatedTail) reason = 'frase_truncada';
+
+  const quote = hasHoldNoReturn
+    ? (turns[clientHoldIdx]?.text || '')
+    : (last.text || '');
+  const at = hasHoldNoReturn ? (turns[clientHoldIdx]?.t || '') : (last.t || '');
+
+  return { cut, reason, quote: quote.slice(0,200), at };
+}
+
+/** Añade etiqueta sin duplicar */
+function pushEtiqueta(analisis, tag) {
+  analisis.etiquetas = Array.isArray(analisis.etiquetas) ? analisis.etiquetas : [];
+  if (!analisis.etiquetas.includes(tag)) analisis.etiquetas.push(tag);
+}
 
 function calibratePosibleNegociacion(analisis={}, transcript='') {
   if (!analisis?.consolidado?.porAtributo) return analisis;
@@ -813,76 +876,81 @@ function calibratePosibleNegociacion(analisis={}, transcript='') {
   return analisis;
 }
 
-/* ===== NUEVO: Calibración SOLO para "Renuentes" (actualizada a 10 ítems) ===== */
-function calibrateRenuente(analisis={}, transcript='') {
+function calibrateRenuente(analisis = {}, transcript = '') {
   if (!analisis?.consolidado?.porAtributo) return analisis;
   const por = ensureBlock(analisis.consolidado.porAtributo);
 
+  // --- detectar corte del cliente
+  const cutInfo = detectClientCut(String(transcript || ''));
+  if (cutInfo.cut) {
+    // Neutralizar SOLO ítems imposibilitados (1–4) con no_aplica_por_corte_cliente
+    for (const a of por) {
+      const name = String(a?.atributo || '').toLowerCase();
+      const is1 = name.startsWith('1.') && name.includes('indaga motivo');
+      const is2 = name.startsWith('2.') && name.includes('debate objeciones');
+      const is3 = name.startsWith('3.') && (name.includes('1581') || name.includes('grabada'));
+      const is4 = name.startsWith('4.') && (name.includes('guion') || name.includes('guión'));
+      if (is1 || is2 || is3 || is4) {
+        a.aplica = false;
+        a.cumplido = true; // neutralizado
+        if (!a.justificacion || a.justificacion === 'no_evidencia') {
+          a.justificacion = 'no_aplica_por_corte_cliente';
+        }
+      }
+    }
+    // Señalizar
+    analisis.flags = { ...(analisis.flags || {}), corte_cliente: true };
+    pushEtiqueta(analisis, 'corte_cliente');
+    // Opcional: agrega hallazgo claro (no obligatorio)
+    analisis.hallazgos = Array.isArray(analisis.hallazgos) ? analisis.hallazgos : [];
+    const nota = cutInfo.at ? ` (${cutInfo.at})` : '';
+    analisis.hallazgos.unshift(`Corte del cliente (${cutInfo.reason.replace(/_/g,' ')}) — "${cutInfo.quote}"${nota}`.trim());
+  }
+
+  // --- Reglas adicionales ya existentes para 1581 / guion (solo si siguen aplicando)
   for (const a of por) {
+    // si ya quedó neutralizado (aplica=false) no tocar
+    if (a.aplica === false) continue;
+
     const label = norm(a?.atributo || '');
 
-    // Ítem 4 — Despedida (aceptar identificación + empresa)
-    if (label.startsWith('4.') && label.includes('despedida')) {
-      if (a.aplica !== false && a.cumplido === false) {
-        const ev = findFarewellEvidence(a.justificacion, transcript);
-        if (ev) {
-          a.cumplido = true;
-          if (!a.justificacion || a.justificacion === 'no_evidencia') {
-            a.justificacion = `"${String(ev).trim()}"`;
-          }
-        }
-      }
-    }
-
-    // Ítem 7 — Ley 1581 (aceptar "15 81"; forzar NO CUMPLE si no hay ley)
+    // Ley 1581
     if (label.includes('1581') || label.includes('grabada')) {
-      if (a.aplica !== false) {
-        const hasLaw = !!(findLey1581(a.justificacion) || findLey1581(transcript));
-        if (hasLaw) {
-          a.cumplido = true;
-          if (!a.justificacion || a.justificacion === 'no_evidencia') {
-            const line = (String(transcript||'').split(/\r?\n/).find(l => findLey1581(l)) || 'Se menciona la ley 1581 (o “15 81”) y tratamiento/protección de datos.');
-            a.justificacion = `"${line.trim().slice(0,220)}"`;
-          }
-        } else {
-          a.cumplido = false;
-          a.justificacion = 'no_evidencia';
-        }
-      }
-    }
-
-    // Ítem 1 — Beneficios y consecuencias (mismo endurecimiento)
-    if (label.startsWith('1.') && label.includes('beneficios') && label.includes('consecuencias')) {
-      const source = a.justificacion && a.justificacion !== 'no_evidencia'
-        ? a.justificacion
-        : transcript;
-      const ok = hasBenefitAndConsequence(source);
-      if (!ok) {
-        a.cumplido = false;
+      const hasLaw = !!(findLey1581(a.justificacion) || findLey1581(transcript));
+      if (hasLaw) {
+        a.cumplido = true;
         if (!a.justificacion || a.justificacion === 'no_evidencia') {
-          a.justificacion = 'no_evidencia';
-        } else if (INVALID_BENCONS.some(k => norm(a.justificacion).includes(k))) {
-          a.justificacion = 'no_evidencia';
+          const line = (String(transcript||'').split(/\r?\n/).find(l => findLey1581(l)) || 'Se menciona la ley 1581 (o “15 81”).');
+          a.justificacion = `"${line.trim().slice(0,220)}"`;
         }
+      } else {
+        a.cumplido = false;
+        a.justificacion = 'no_evidencia';
       }
     }
 
-    // Ítem 8 — Guion completo (CUENTAS/CANALES CORPORATIVOS/EMPRESARIALES obligatorios)
-    if (label.startsWith('8.') || (label.includes('guion') && label.includes('campana'))) {
-      if (a.aplica !== false) {
-        const source = (a.justificacion && a.justificacion !== 'no_evidencia') ? a.justificacion : transcript;
-        const okCorp = hasCorporateChannelEvidence(source) || hasCorporateChannelEvidence(transcript);
-        if (okCorp) {
-          a.cumplido = true;
-          if (!a.justificacion || a.justificacion === 'no_evidencia') {
-            const line = findCorporateEvidenceLine(transcript) || 'Se aclara que el recaudo es únicamente por cuentas/canales corporativos a nombre de la compañía.';
-            a.justificacion = `"${line.trim().slice(0,220)}"`;
-          }
-        } else {
-          a.cumplido = false;
-          a.justificacion = 'no_evidencia';
+    // Guion/canales corporativos
+    if (label.includes('guion') || label.includes('guión')) {
+      const source = (a.justificacion && a.justificacion !== 'no_evidencia') ? a.justificacion : transcript;
+      const okCorp = hasCorporateChannelEvidence(source) || hasCorporateChannelEvidence(transcript);
+      if (okCorp) {
+        a.cumplido = true;
+        if (!a.justificacion || a.justificacion === 'no_evidencia') {
+          const line = findCorporateEvidenceLine(transcript) || 'Se aclara que el recaudo es únicamente por cuentas/canales corporativos a nombre de la compañía.';
+          a.justificacion = `"${line.trim().slice(0,220)}"`;
         }
+      } else {
+        a.cumplido = false;
+        a.justificacion = 'no_evidencia';
       }
+    }
+
+    // Ítems 5 y 6: mantener criterio “por defecto true” si no hay evidencia en contra
+    if (label.startsWith('5.') && label.includes('engaños')) {
+      // Si no hay evidencia de engaño, se deja true (ya venía así)
+    }
+    if (label.startsWith('6.') && (label.includes('vocabulario') || label.includes('respetuoso'))) {
+      // Si no hay irrespeto explícito, se deja true
     }
   }
 
